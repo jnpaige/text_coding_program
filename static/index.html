@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Text Coding Program</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #1a1a2e; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
+
+  /* Top bar */
+  #topbar { background: #16213e; padding: 8px 16px; display: flex; align-items: center; gap: 16px; border-bottom: 1px solid #0f3460; flex-shrink: 0; }
+  #topbar .label { color: #94a3b8; font-size: 13px; }
+  #topbar .value { color: #e2e8f0; font-weight: 600; }
+  #topbar select { background: #1a1a2e; color: #e0e0e0; border: 1px solid #334155; padding: 4px 8px; border-radius: 4px; }
+  #progress-badge { margin-left: auto; background: #0f3460; padding: 4px 12px; border-radius: 12px; font-size: 13px; }
+
+  /* Main layout */
+  #main { display: flex; flex: 1; overflow: hidden; }
+
+  /* Left panel — PDF viewer */
+  #pdf-panel { width: 50%; display: flex; flex-direction: column; border-right: 1px solid #0f3460; }
+  #page-nav { background: #16213e; padding: 6px 12px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #0f3460; flex-shrink: 0; }
+  #page-nav button { background: #334155; color: #e0e0e0; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; }
+  #page-nav button:hover { background: #475569; }
+  #page-nav button:disabled { opacity: 0.3; cursor: default; }
+  #page-info { font-size: 13px; color: #94a3b8; }
+  #page-container { flex: 1; overflow: auto; display: flex; justify-content: center; padding: 8px; background: #111; }
+  #page-img { max-width: 100%; height: auto; }
+
+  /* Right panel — codebook + data entry + progress */
+  #right-panel { width: 50%; display: flex; flex-direction: column; }
+
+  /* Codebook entry */
+  #codebook-panel { flex: 1; overflow: auto; padding: 16px; border-bottom: 1px solid #0f3460; }
+  #codebook-panel h3 { color: #60a5fa; margin-bottom: 8px; font-size: 15px; }
+  #codebook-text { font-size: 13px; line-height: 1.6; white-space: pre-wrap; color: #cbd5e1; }
+
+  /* Data entry */
+  #entry-panel { background: #16213e; padding: 16px; border-bottom: 1px solid #0f3460; flex-shrink: 0; }
+  #entry-panel h3 { color: #60a5fa; margin-bottom: 10px; font-size: 14px; }
+  .entry-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .entry-row label { font-size: 13px; color: #94a3b8; min-width: 80px; }
+  .radio-group { display: flex; gap: 12px; }
+  .radio-group label { display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 13px; color: #e0e0e0; }
+  .radio-group input[type="radio"] { accent-color: #60a5fa; }
+  input[type="text"], input[type="number"], textarea { background: #1a1a2e; color: #e0e0e0; border: 1px solid #334155; padding: 6px 10px; border-radius: 4px; width: 100%; font-size: 13px; }
+  textarea { resize: vertical; min-height: 48px; }
+  #entry-buttons { display: flex; gap: 8px; margin-top: 12px; }
+  #entry-buttons button { padding: 8px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 600; }
+  #btn-save { background: #2563eb; color: white; }
+  #btn-save:hover { background: #1d4ed8; }
+  #btn-skip { background: #334155; color: #e0e0e0; }
+  #btn-skip:hover { background: #475569; }
+
+  /* Progress sidebar */
+  #progress-panel { background: #0f172a; padding: 12px 16px; max-height: 200px; overflow-y: auto; flex-shrink: 0; }
+  #progress-panel h4 { color: #60a5fa; margin-bottom: 8px; font-size: 13px; }
+  .prog-item { font-size: 12px; padding: 2px 0; display: flex; justify-content: space-between; }
+  .prog-item.done { color: #4ade80; }
+  .prog-item.current { color: #facc15; font-weight: 600; }
+  .prog-item.pending { color: #64748b; }
+
+  /* Investigation tabs */
+  #inv-tabs { display: flex; gap: 4px; padding: 8px 12px; background: #16213e; border-bottom: 1px solid #0f3460; flex-wrap: wrap; flex-shrink: 0; }
+  .inv-tab { padding: 4px 10px; font-size: 12px; border-radius: 4px; cursor: pointer; background: #334155; color: #94a3b8; border: none; }
+  .inv-tab.active { background: #2563eb; color: white; }
+
+  /* Startup overlay */
+  #startup { position: fixed; inset: 0; background: rgba(0,0,0,0.8); display: flex; justify-content: center; align-items: center; z-index: 100; }
+  #startup.hidden { display: none; }
+  #startup-box { background: #16213e; padding: 32px; border-radius: 8px; width: 400px; }
+  #startup-box h2 { color: #60a5fa; margin-bottom: 16px; }
+  #startup-box p { color: #94a3b8; font-size: 13px; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+
+<div id="startup">
+  <div id="startup-box">
+    <h2>Text Coding Program</h2>
+    <p>Loading session...</p>
+    <div id="startup-status"></div>
+  </div>
+</div>
+
+<div id="topbar">
+  <span class="label">Coder:</span><span class="value" id="coder-name"></span>
+  <span class="label">Site:</span>
+  <select id="tri-select"></select>
+  <span class="label">Trait:</span>
+  <select id="trait-select"></select>
+  <span id="progress-badge">0 / 0</span>
+</div>
+
+<div id="main">
+  <div id="pdf-panel">
+    <div id="inv-tabs"></div>
+    <div id="page-nav">
+      <button id="btn-prev" onclick="prevPage()">&larr; Prev</button>
+      <span id="page-info">Page 0 / 0</span>
+      <button id="btn-next" onclick="nextPage()">Next &rarr;</button>
+    </div>
+    <div id="page-container">
+      <img id="page-img" alt="PDF page">
+    </div>
+  </div>
+
+  <div id="right-panel">
+    <div id="codebook-panel">
+      <h3 id="codebook-title">Select a trait</h3>
+      <div id="codebook-text"></div>
+    </div>
+
+    <div id="entry-panel">
+      <h3>Code Entry</h3>
+      <div id="entry-controls"></div>
+      <div class="entry-row">
+        <label>Justification:</label>
+      </div>
+      <textarea id="justification" placeholder="Brief note citing evidence..."></textarea>
+      <div id="entry-buttons">
+        <button id="btn-save" onclick="saveAndNext()">Save &amp; Next (Enter)</button>
+        <button id="btn-skip" onclick="skipTrait()">Skip (Esc)</button>
+      </div>
+    </div>
+
+    <div id="progress-panel">
+      <h4>Progress</h4>
+      <div id="progress-list"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+let session = null;
+let triData = null;
+let currentTri = '';
+let currentInvIdx = 0;
+let currentTraitIdx = 0;
+let currentPage = 0;
+let pageList = [];
+let codedResults = {};
+
+async function init() {
+  const res = await fetch('/api/session');
+  session = await res.json();
+
+  document.getElementById('coder-name').textContent = session.coder_id;
+  document.getElementById('startup').classList.add('hidden');
+
+  const triSel = document.getElementById('tri-select');
+  session.trinomials.forEach(tri => {
+    const opt = document.createElement('option');
+    opt.value = tri; opt.textContent = tri;
+    triSel.appendChild(opt);
+  });
+  triSel.onchange = () => loadTrinomial(triSel.value);
+
+  const traitSel = document.getElementById('trait-select');
+  session.traits.forEach((t, i) => {
+    const opt = document.createElement('option');
+    opt.value = i; opt.textContent = t.title || t.code_id;
+    traitSel.appendChild(opt);
+  });
+  traitSel.onchange = () => { currentTraitIdx = parseInt(traitSel.value); showTrait(); };
+
+  if (session.trinomials.length > 0) {
+    loadTrinomial(session.trinomials[0]);
+  }
+}
+
+async function loadTrinomial(tri) {
+  currentTri = tri;
+  document.getElementById('tri-select').value = tri;
+
+  const res = await fetch(`/api/trinomial/${tri}`);
+  triData = await res.json();
+
+  codedResults = {};
+  for (const [key, val] of Object.entries(triData.coded_traits || {})) {
+    codedResults[key] = val;
+  }
+
+  buildInvTabs();
+  currentInvIdx = 0;
+  currentTraitIdx = 0;
+  selectInvestigation(0);
+  updateProgress();
+}
+
+function buildInvTabs() {
+  const container = document.getElementById('inv-tabs');
+  container.innerHTML = '';
+
+  if (triData.segments.length === 0) {
+    const btn = document.createElement('button');
+    btn.className = 'inv-tab active';
+    btn.textContent = 'All pages';
+    btn.onclick = () => selectInvestigation(0);
+    container.appendChild(btn);
+    return;
+  }
+
+  triData.segments.forEach((seg, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'inv-tab' + (i === currentInvIdx ? ' active' : '');
+    btn.textContent = `${seg.label || 'Inv ' + (i+1)} (${seg.year || '?'})`;
+    btn.onclick = () => selectInvestigation(i);
+    container.appendChild(btn);
+  });
+}
+
+function selectInvestigation(idx) {
+  currentInvIdx = idx;
+
+  document.querySelectorAll('.inv-tab').forEach((t, i) => {
+    t.className = 'inv-tab' + (i === idx ? ' active' : '');
+  });
+
+  if (triData.segments.length > 0) {
+    const seg = triData.segments[idx];
+    const allTyped = [
+      ...(seg.form_pages || []),
+      ...(seg.narrative_pages || []),
+      ...(seg.nrhp_pages || [])
+    ];
+    pageList = allTyped.length > 0
+      ? [...new Set(allTyped)].sort((a, b) => a - b)
+      : (seg.pages || []).sort((a, b) => a - b);
+  } else {
+    pageList = Array.from({length: triData.n_pages}, (_, i) => i);
+  }
+
+  currentPage = 0;
+  showPage();
+  showTrait();
+  updateProgress();
+}
+
+function showPage() {
+  const img = document.getElementById('page-img');
+  if (pageList.length === 0) {
+    img.src = '';
+    document.getElementById('page-info').textContent = 'No pages';
+    return;
+  }
+  const pn = pageList[currentPage];
+  img.src = `/api/page/${currentTri}/${pn}`;
+  document.getElementById('page-info').textContent = `Page ${pn} (${currentPage + 1} / ${pageList.length})`;
+  document.getElementById('btn-prev').disabled = currentPage === 0;
+  document.getElementById('btn-next').disabled = currentPage >= pageList.length - 1;
+}
+
+function prevPage() { if (currentPage > 0) { currentPage--; showPage(); } }
+function nextPage() { if (currentPage < pageList.length - 1) { currentPage++; showPage(); } }
+
+async function showTrait() {
+  const trait = session.traits[currentTraitIdx];
+  document.getElementById('trait-select').value = currentTraitIdx;
+
+  const res = await fetch(`/api/trait/${trait.code_id}`);
+  const full = await res.json();
+
+  document.getElementById('codebook-title').textContent = full.title || full.code_id;
+  document.getElementById('codebook-text').textContent = full.full_text || '';
+
+  const controls = document.getElementById('entry-controls');
+  controls.innerHTML = '';
+
+  const invLabel = triData.segments.length > 0
+    ? (triData.segments[currentInvIdx].label || 'all')
+    : 'all';
+  const existingKey = `${invLabel}::${trait.code_id}`;
+  const existing = codedResults[existingKey];
+
+  const dt = (trait.data_type || 'binary').toLowerCase();
+  const row = document.createElement('div');
+  row.className = 'entry-row';
+
+  if (dt === 'binary') {
+    row.innerHTML = `
+      <label>Value:</label>
+      <div class="radio-group">
+        <label><input type="radio" name="trait_value" value="true" ${existing?.trait_value === true ? 'checked' : ''}> Present</label>
+        <label><input type="radio" name="trait_value" value="false" ${existing?.trait_value === false ? 'checked' : ''}> Absent</label>
+      </div>`;
+  } else if (dt === 'numeric') {
+    row.innerHTML = `
+      <label>Value:</label>
+      <input type="text" id="trait_value_input" placeholder="Number or 'unknown'" value="${existing?.trait_value ?? ''}">`;
+  } else {
+    const cats = (trait.categories || '').split(/[,;]/).map(c => c.trim()).filter(Boolean);
+    if (cats.length > 0) {
+      let html = '<label>Value:</label><div class="radio-group" style="flex-wrap:wrap">';
+      cats.forEach(c => {
+        html += `<label><input type="radio" name="trait_value" value="${c}" ${existing?.trait_value === c ? 'checked' : ''}> ${c}</label>`;
+      });
+      html += `<label><input type="radio" name="trait_value" value="undetermined" ${existing?.trait_value === 'undetermined' ? 'checked' : ''}> undetermined</label>`;
+      html += '</div>';
+      row.innerHTML = html;
+    } else {
+      row.innerHTML = `
+        <label>Value:</label>
+        <input type="text" id="trait_value_input" placeholder="Category value" value="${existing?.trait_value ?? ''}">`;
+    }
+  }
+  controls.appendChild(row);
+
+  document.getElementById('justification').value = existing?.justification || '';
+  updateProgress();
+}
+
+function getEnteredValue() {
+  const trait = session.traits[currentTraitIdx];
+  const dt = (trait.data_type || 'binary').toLowerCase();
+
+  if (dt === 'binary') {
+    const checked = document.querySelector('input[name="trait_value"]:checked');
+    if (!checked) return undefined;
+    return checked.value === 'true';
+  } else if (dt === 'numeric') {
+    const v = document.getElementById('trait_value_input').value.trim();
+    if (!v) return undefined;
+    const n = parseFloat(v);
+    return isNaN(n) ? v : n;
+  } else {
+    const checked = document.querySelector('input[name="trait_value"]:checked');
+    if (checked) return checked.value;
+    const inp = document.getElementById('trait_value_input');
+    return inp ? inp.value.trim() || undefined : undefined;
+  }
+}
+
+async function saveAndNext() {
+  const trait = session.traits[currentTraitIdx];
+  const value = getEnteredValue();
+  if (value === undefined) { alert('Please enter a value.'); return; }
+
+  const invLabel = triData.segments.length > 0
+    ? (triData.segments[currentInvIdx].label || 'all')
+    : 'all';
+
+  const result = {
+    trait_key: trait.code_id,
+    trait_value: value,
+    confidence: 1.0,
+    justification: document.getElementById('justification').value.trim(),
+    evidence_pages: [...pageList],
+  };
+
+  codedResults[`${invLabel}::${trait.code_id}`] = result;
+
+  const investigations = buildInvestigations();
+  await fetch(`/api/save/${currentTri}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({investigations}),
+  });
+
+  advance();
+}
+
+function skipTrait() { advance(); }
+
+function advance() {
+  if (currentTraitIdx < session.traits.length - 1) {
+    currentTraitIdx++;
+    showTrait();
+  } else if (triData.segments.length > 0 && currentInvIdx < triData.segments.length - 1) {
+    currentTraitIdx = 0;
+    selectInvestigation(currentInvIdx + 1);
+  } else {
+    const triIdx = session.trinomials.indexOf(currentTri);
+    if (triIdx < session.trinomials.length - 1) {
+      loadTrinomial(session.trinomials[triIdx + 1]);
+    } else {
+      alert('All trinomials coded!');
+    }
+  }
+}
+
+function buildInvestigations() {
+  const invs = [];
+  if (triData.segments.length === 0) {
+    const traits = [];
+    for (const [key, val] of Object.entries(codedResults)) {
+      if (key.startsWith('all::')) traits.push(val);
+    }
+    if (traits.length > 0) {
+      invs.push({
+        file_trinomial: currentTri,
+        investigation_label: null,
+        investigation_year: null,
+        traits,
+      });
+    }
+  } else {
+    triData.segments.forEach(seg => {
+      const label = seg.label || 'all';
+      const traits = [];
+      for (const [key, val] of Object.entries(codedResults)) {
+        if (key.startsWith(`${label}::`)) traits.push(val);
+      }
+      invs.push({
+        file_trinomial: currentTri,
+        investigation_label: seg.label,
+        investigation_year: seg.year,
+        traits,
+      });
+    });
+  }
+  return invs;
+}
+
+function updateProgress() {
+  const list = document.getElementById('progress-list');
+  list.innerHTML = '';
+
+  const invLabel = triData?.segments?.length > 0
+    ? (triData.segments[currentInvIdx]?.label || 'all')
+    : 'all';
+  const currentCode = session?.traits?.[currentTraitIdx]?.code_id;
+
+  let coded = 0;
+  const total = (session?.traits?.length || 0) * Math.max(1, triData?.segments?.length || 0);
+
+  (session?.traits || []).forEach(t => {
+    const invCount = triData?.segments?.length || 1;
+    for (let i = 0; i < invCount; i++) {
+      const il = triData?.segments?.[i]?.label || 'all';
+      const key = `${il}::${t.code_id}`;
+      if (codedResults[key]) coded++;
+    }
+  });
+
+  document.getElementById('progress-badge').textContent = `${coded} / ${total} traits`;
+
+  (session?.traits || []).forEach((t, i) => {
+    const key = `${invLabel}::${t.code_id}`;
+    const div = document.createElement('div');
+    const isDone = !!codedResults[key];
+    const isCurrent = t.code_id === currentCode;
+    div.className = 'prog-item ' + (isCurrent ? 'current' : isDone ? 'done' : 'pending');
+    div.innerHTML = `<span>${t.title || t.code_id}</span><span>${isDone ? '&#10003;' : ''}</span>`;
+    div.style.cursor = 'pointer';
+    div.onclick = () => { currentTraitIdx = i; showTrait(); };
+    list.appendChild(div);
+  });
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && document.activeElement.tagName !== 'TEXTAREA') {
+    e.preventDefault(); saveAndNext();
+  }
+  if (e.key === 'Escape') { e.preventDefault(); skipTrait(); }
+  if (e.key === 'ArrowLeft' && !document.activeElement.matches('input,textarea')) { prevPage(); }
+  if (e.key === 'ArrowRight' && !document.activeElement.matches('input,textarea')) { nextPage(); }
+});
+
+init();
+</script>
+</body>
+</html>
