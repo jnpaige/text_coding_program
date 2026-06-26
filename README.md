@@ -1,6 +1,7 @@
 # text_coding_program
 
-Browser-based interactive text coding against structured codebooks, inspired by [McPherron's E4/Enterer](https://www.oldstoneage.com/osa/tech/e4/). Designed as a companion to `site_coder` — uses the same inputs and produces the same output JSON format, so human-coded and LLM-coded results can be compared directly for inter-rater reliability analysis.
+Browser-based interactive text coding against structured codebooks, inspired by [McPherron's E4/Enterer Trois](https://www.oldstoneage.com/osa/tech/e4/). This program takes in the same kind of information that Site_coder ingests: a text corpus processed with pdf_ocr, a page mapping that highlights pages that need to be coded with site_form_segmenter, and codebook entries extracted from a natural language codebook using codebook_tools. The goal of this program is to help coders more effectively code text, without juggling multiple files, whily minimizing coder fatigue, and helping to reduce entry error. 
+
 
 ## Pipeline context
 
@@ -11,46 +12,8 @@ pdf_ocr ──────► site_form_segmenter ──────► text_cod
                                       └───► site_coder (LLM batch)
 codebook_tools ───────────────────────────►
 ```
+See [pdf_ocr](https://github.com/jnpaige/pdf_ocr) for more detail about this workflow. 
 
-### pdf_ocr
-
-Converts scanned or born-digital PDFs into machine-readable outputs using Surya OCR + Docling. Per input PDF, it produces a trinomial subdirectory:
-
-```
-<output_dir>/
-  16VN1000/
-    16VN1000.md            Markdown with layout, tables, reading order
-    16VN1000_ocr.pdf       searchable PDF with OCR text layer
-    ocr_docling.json       structured per-page OCR results
-    text_docling.txt       plain text with === Page N === markers
-```
-
-The `_ocr.pdf` is what this program renders in the page viewer. The `text_docling.txt` with `=== Page N ===` markers is what the segmenter and site_coder consume for text-based processing.
-
-### site_form_segmenter
-
-Takes the pdf_ocr output and identifies investigation boundaries and page types within each multi-investigation site form. Uses a 4-pass LLM approach (investigation boundaries → form page → narrative pages → NRHP pages). Per site, it produces:
-
-```
-<run_dir>/<model_slug>/
-  16VN1000.segments.json     structured investigation boundaries + page types
-  segmentation_map.md        human-readable page map
-  segments.csv               machine-readable segment table
-```
-
-Each `segments.json` contains an array of investigations, each with:
-- `label` — investigation name (e.g. "1994 Phase I Survey")
-- `year` — investigation year
-- `pages` — all pages belonging to this investigation
-- `form_pages` — structured site record form page(s)
-- `narrative_pages` — narrative prose pages
-- `nrhp_pages` — NRHP eligibility discussion pages
-
-This program uses the segment map to scope the page viewer to the relevant investigation pages and to structure the coding workflow as one investigation at a time — matching what `site_coder` does with its LLM calls.
-
-### codebook_tools
-
-Parses `.Rmd` codebook source files into per-trait JSON files. Each JSON contains a `full_text` field (the complete codebook entry as markdown), a `data_type` field (`binary`, `categorical`, `numeric`), and parsed sections (definition, inclusion/exclusion criteria, exemplars). This program displays the codebook entry alongside each page and uses `data_type` to select the appropriate input control.
 
 ## What this program does
 
