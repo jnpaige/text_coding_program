@@ -1,30 +1,38 @@
 # text_coding_program
 
-A browser-based interactive coding program for archaeologists, inspired by [McPherron's E4/Enterer](https://www.oldstoneage.com/osa/tech/e4/). This tool uses the same inputs as the LLM-based extraction pipeline — [pdf_ocr](https://github.com/jnpaige/pdf_ocr) output, codebook trait JSON files, and the page maps produced by [site_form_segmenter](https://github.com/jnpaige/site_form_segmenter) — and produces output in the same JSON format. The goal is to make it straightforward to compare human coding decisions against model coding decisions on the same documents and codebook, which is what inter-rater reliability analysis requires.
+Browser-based interactive text coding against structured codebooks, inspired by [McPherron's E4/Enterer Trois](https://www.oldstoneage.com/osa/tech/e4/). This program takes in the same kind of information that Site_coder ingests: a text corpus processed with pdf_ocr, a page mapping that highlights pages that need to be coded with site_form_segmenter, and codebook entries extracted from a natural language codebook using codebook_tools. The goal of this program is to help coders more effectively code text, without juggling multiple files, whily minimizing coder fatigue, and helping to reduce entry error. 
 
----
 
-## How it fits into the pipeline
+## Pipeline context
 
-This program sits at the end of the same pipeline as the LLM coding tools. [pdf_ocr](https://github.com/jnpaige/pdf_ocr) converts the raw PDFs into searchable PDFs and page-indexed text files. [site_form_segmenter](https://github.com/jnpaige/site_form_segmenter) takes that output and builds a page map for each document, identifying which pages belong to which investigation and what kind of content each page contains. This program reads both: it renders the `_ocr.pdf` pages in the browser viewer and uses the segment map to scope the viewer to only the pages relevant to the current investigation and trait.
+This tool sits at the end of a multi-repo pipeline. Each upstream repo produces output that feeds the next:
 
-The codebook side works the same way. Codebook entries are parsed into per-trait JSON files by codebook_tools, and this program reads those files to display the codebook definition alongside the PDF page. The data entry controls (radio buttons for binary traits, text input for numeric, radio buttons for categorical) are generated from the trait's `data_type` field in the JSON.
+```
+pdf_ocr ──────► site_form_segmenter ──────► text_coding_program
+                                      └───► site_coder (LLM batch)
+codebook_tools ───────────────────────────►
+```
+See [pdf_ocr](https://github.com/jnpaige/pdf_ocr) for more detail about this workflow. 
 
----
 
-## What it does
+## What this program does
 
-When you start the server and open the browser, you're presented with a project picker. You either create a new project by entering a name, your coder ID, and the paths to the three input directories, or you open an existing project and pick up where you left off. Projects are persistent — all your coding progress is saved in a `projects/` folder next to the program, and you can close and reopen the browser freely without losing work.
+A single-page web app served locally that presents:
 
-Once inside a project, the coding unit is one investigation within one site form, structured the same way as an LLM extraction call. The left panel shows the PDF page viewer; the right panel shows the codebook entry for the current trait alongside the data entry controls. You navigate pages with the arrow keys, enter a value with the number keys (1–9 select the corresponding option), add a brief justification, and press Enter to save and move to the next trait. The progress sidebar on the right shows which traits have been coded for the current investigation with click-to-jump navigation.
+- **Left panel** — PDF page viewer with page navigation (arrow keys or buttons). Pages are scoped to the current investigation using the segment map.
+- **Right panel** — Full codebook entry text for the current trait, plus data entry controls (radio buttons for binary, text input for numeric, radio buttons for categorical) and a justification field.
+- **Unit selector** — Dropdown showing each `(trinomial, investigation)` pair from the segment map (e.g., "16VN1000 — Initial Survey (1997)").
+- **Progress sidebar** — Shows which traits have been coded for the current investigation, with click-to-jump navigation.
 
----
+Workflow: the coding unit is one investigation within one site form. For each unit, you code all traits, then advance to the next investigation. This matches site_coder's output structure exactly.
 
-## Keyboard shortcuts
+### Keyboard shortcuts
 
-Enter saves the current entry and advances to the next trait. Escape skips to the next trait without saving. Left and right arrow keys flip PDF pages. The number keys 1 through 9 select the corresponding radio button option for the current trait. Plus and minus zoom the PDF in and out; 0 resets to fit width. Ctrl+scroll wheel also zooms.
-
----
+| Key | Action |
+|---|---|
+| **Enter** | Save current trait and advance to next |
+| **Esc** | Skip to next trait without saving |
+| **← →** | Previous / next PDF page |
 
 ## Setup
 
@@ -46,21 +54,65 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 ```
 
-`uv.lock` is committed to the repo, so every machine gets identical package versions. If you prefer to activate the venv manually, run `.venv\Scripts\activate` on Windows or `source .venv/bin/activate` on Mac/Linux, then use `python server.py` directly.
+`uv.lock` is committed to the repo, so every machine gets identical package versions.
 
-### 3. Start the server
+If you prefer to activate the venv manually:
 
 ```powershell
-uv run python server.py
+# Windows
+.venv\Scripts\activate
+python server.py
 ```
 
-The server auto-finds an open port if the default (8090) is busy. Open the URL it prints in your browser, and the project picker will appear.
+```bash
+# Mac/Linux
+source .venv/bin/activate
+python server.py
+```
 
----
+## Usage
+
+### 1. Configure paths
+
+Edit `config.yaml` (or copy `config_test.yaml` as a starting point):
+
+```yaml
+pdf_dir: 'path/to/pdf_ocr/output'             # <trinomial>/ subdirs with _ocr.pdf files
+codebook_dir: 'path/to/codebook_tools/output'  # per-trait JSON files
+segments_dir: 'path/to/segmenter/run/model'    # <trinomial>.segments.json files
+```
+
+### 2. Start the server
+
+```powershell
+uv run python server.py --coder jpaige
+```
+
+If `--coder` is omitted, you'll be prompted for your coder ID. The server auto-finds an open port if the configured one is busy.
+
+```powershell
+# Use a different config
+uv run python server.py --config config_test.yaml --coder jpaige
+```
+
+### 3. Open browser
+
+Navigate to the URL printed in the terminal (default `http://127.0.0.1:8090`).
 
 ## Output
 
-Coded results are saved in a `projects/` folder next to the server. Each project gets its own directory containing a `coded/` subdirectory with one `.coded.json` file per site. The JSON structure matches what site_coder produces:
+Output follows the same run directory convention as site_coder, with the coder ID in place of the model name:
+
+```
+runs/
+  YYYYMMDD_HHMM_gitsha/
+    jpaige/                         coder ID folder
+      16VN1000.coded.json
+      16VN1001.coded.json
+      ...
+```
+
+Each `.coded.json` matches site_coder's format with added human-coding metadata:
 
 ```json
 {
@@ -82,33 +134,55 @@ Coded results are saved in a `projects/` folder next to the server. Each project
     }
   ],
   "coder_id": "jpaige",
-  "project": "Kisatchie chunk 3",
   "first_saved": "2026-06-20T...",
   "last_saved": "2026-06-20T..."
 }
 ```
 
-The identical output schema means human and LLM results can be loaded into the same inter-rater reliability pipeline (Cohen's kappa, Krippendorff's alpha) without any format conversion.
+Sessions are resumable — existing `.coded.json` files are loaded when you revisit a trinomial.
 
----
+## Shared input/output contract with site_coder
+
+| | text_coding_program | site_coder |
+|---|---|---|
+| **Input: PDFs** | `pdf_dir` — renders `_ocr.pdf` for viewing | `md_input_dir` — reads `text_docling.txt` for LLM prompts |
+| **Input: segments** | `segments_dir` — scopes pages per investigation | `segments_dir` — scopes text per investigation |
+| **Input: codebook** | `codebook_dir` — displays entries for human coder | `codebook_dir` — injects entries into LLM prompts |
+| **Output** | `<coder_id>/<tri>.coded.json` | `<model_slug>/<tri>.coded.json` |
+| **Output schema** | `{trinomial, investigations: [{traits: [...]}]}` | identical |
+| **Coding unit** | one investigation (from segment map) | one investigation (from segment map) |
+
+The identical output schema means human and LLM results can be loaded into the same IRR comparison pipeline (Cohen's kappa, Krippendorff's alpha) without any format conversion.
 
 ## Distributing to a team
 
-The program can be packaged as a standalone `.exe` bundle that requires no Python, uv, or terminal knowledge. Users double-click the exe, a browser opens to the project picker, and they can start coding immediately. No installation required beyond unzipping.
+The program can be packaged as a standalone `.exe` bundle that requires no Python, uv, or terminal knowledge. Users double-click the exe and a browser opens.
 
-To build the bundle:
+### Building the bundle
 
 ```powershell
 # Install the build dependency (one time)
 uv sync --extra build
 
-# Build the distributable folder (~70 MB)
+# Build the distributable folder
 uv run python build.py --build
 ```
 
-This produces `dist/text_coding_program/`. Zip that folder and share it. End users unzip, double-click `text_coding_program.exe`, and their browser opens to the project picker. Projects are saved in a `projects/` folder next to the exe and persist across sessions.
+This produces `dist/text_coding_program/` (~70 MB) containing the exe, Python runtime, and all dependencies. To distribute:
 
----
+```powershell
+# Zip the folder
+Compress-Archive -Path dist\text_coding_program -DestinationPath text_coding_program.zip
+```
+
+### For end users
+
+1. Unzip `text_coding_program.zip` to any location
+2. Double-click `text_coding_program.exe`
+3. A browser opens to the project picker — create a new project or resume an existing one
+4. Close the console window to stop the server
+
+Projects are saved in a `projects/` folder next to the exe and persist across sessions. No installation required.
 
 ## Dependencies
 
