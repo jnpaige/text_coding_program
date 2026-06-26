@@ -3,24 +3,18 @@
 server.py — Browser-based interactive text coding program.
 
 Serves a single-page app for coding site forms against a structured codebook.
-PDF pages are rendered on the fly; codebook entries are displayed alongside.
-Segment maps (from site_form_segmenter) optionally filter pages per investigation.
-
-Output matches site_coder's JSON structure so results can be compared directly.
+Projects are persistent — create once, resume across sessions.
 
 Usage:
     uv run python server.py
-    uv run python server.py --config config.yaml
+    uv run python server.py --port 8090
 """
 
 import argparse
-import csv
-import io
 import json
 import re
-import subprocess
+import socket
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,23 +26,31 @@ from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 # ---------------------------------------------------------------------------
-# Globals (set in main)
+# Globals
 # ---------------------------------------------------------------------------
 
 app = FastAPI()
-_cfg: dict = {}
+
+if getattr(sys, 'frozen', False):
+    _base_dir = Path(sys.executable).parent
+    _internal_dir = _base_dir / "_internal"
+else:
+    _base_dir = Path(__file__).parent
+    _internal_dir = _base_dir
+
+_projects_dir = _base_dir / "projects"
+_static_dir = _internal_dir / "static"
+
+_project: dict | None = None
 _traits: list[dict] = []
 _trinomials: list[str] = []
 _segments: dict[str, dict] = {}
 _pdf_cache: dict[str, Path] = {}
-_output_dir: Path = Path("runs")
-_run_dir: Path | None = None
-_coder_id: str = ""
 _page_dpi: int = 150
 
 
 # ---------------------------------------------------------------------------
-# Setup
+# Data loading helpers
 # ---------------------------------------------------------------------------
 
 def _load_traits(codebook_dir: Path) -> list[dict]:
@@ -99,63 +101,189 @@ def _load_segments(segments_dir: Path, pattern: str) -> dict[str, dict]:
     return segs
 
 
-def _git_sha() -> str:
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=Path(__file__).parent, stderr=subprocess.DEVNULL,
-        ).decode().strip()
-    except Exception:
-        return "nogit"
-
-
-def _ensure_run_dir() -> Path:
-    global _run_dir
-    if _run_dir is None:
-        stamp = f"{datetime.now().strftime('%Y%m%d_%H%M')}_{_git_sha()}"
-        _run_dir = _output_dir / stamp
-        _run_dir.mkdir(parents=True, exist_ok=True)
-    return _run_dir
-
-
-def _coder_dir() -> Path:
-    run_dir = _ensure_run_dir()
-    d = run_dir / _coder_id
-    d.mkdir(exist_ok=True)
+def _coded_dir() -> Path:
+    d = Path(_project["project_dir"]) / "coded"
+    d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def _load_existing_results(tri: str) -> dict | None:
-    p = _coder_dir() / f"{tri}.coded.json"
-    if p.exists():
-        return json.loads(p.read_text(encoding="utf-8"))
-    return None
+def _load_project_data(proj: dict) -> None:
+    """Load traits, trinomials, segments, PDFs for the given project."""
+    global _project, _traits, _trinomials, _segments, _pdf_cache, _page_dpi
+
+    _project = proj
+    pattern = proj.get("trinomial_pattern", r"(\d{2}[A-Z]{2}\d+)")
+    _page_dpi = proj.get("page_dpi", 150)
+
+    pdf_dir = Path(proj["pdf_dir"])
+    codebook_dir = Path(proj["codebook_dir"])
+
+    _traits = _load_traits(codebook_dir)
+    _trinomials = _discover_trinomials(pdf_dir, pattern)
+
+    _pdf_cache.clear()
+    for tri in _trinomials:
+        pdf = _find_pdf(pdf_dir, tri)
+        if pdf:
+            _pdf_cache[tri] = pdf
+
+    seg_dir = proj.get("segments_dir")
+    _segments = _load_segments(Path(seg_dir), pattern) if seg_dir else {}
+
+    proj["last_opened"] = datetime.now(timezone.utc).isoformat()
+    _save_project(proj)
+
+
+def _save_project(proj: dict) -> None:
+    proj_path = Path(proj["project_dir"]) / "project.json"
+    proj_path.write_text(json.dumps(proj, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _count_progress(proj: dict) -> dict:
+    """Count coded units for a project without fully loading it."""
+    coded_dir = Path(proj["project_dir"]) / "coded"
+    if not coded_dir.is_dir():
+        return {"coded_files": 0, "coded_traits": 0}
+    coded_files = list(coded_dir.glob("*.coded.json"))
+    n_traits = 0
+    for f in coded_files:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            for inv in data.get("investigations", []):
+                n_traits += len(inv.get("traits", []))
+        except Exception:
+            pass
+    return {"coded_files": len(coded_files), "coded_traits": n_traits}
 
 
 # ---------------------------------------------------------------------------
-# API endpoints
+# API — Project management
 # ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    return FileResponse(Path(__file__).parent / "static" / "index.html")
+    return FileResponse(_static_dir / "index.html")
+
+
+@app.get("/api/projects")
+async def list_projects():
+    _projects_dir.mkdir(exist_ok=True)
+    projects = []
+    for d in sorted(_projects_dir.iterdir()):
+        pf = d / "project.json"
+        if pf.exists():
+            proj = json.loads(pf.read_text(encoding="utf-8"))
+            proj["progress"] = _count_progress(proj)
+            projects.append(proj)
+    return projects
+
+
+@app.post("/api/projects")
+async def create_project(body: dict):
+    name = body.get("name", "").strip()
+    if not name:
+        raise HTTPException(400, "Project name is required")
+
+    slug = re.sub(r'[^\w\s-]', '', name.lower()).strip()
+    slug = re.sub(r'\s+', '_', slug)
+
+    proj_dir = _projects_dir / slug
+    if proj_dir.exists():
+        raise HTTPException(409, f"Project '{slug}' already exists")
+
+    for key in ("pdf_dir", "codebook_dir"):
+        p = Path(body.get(key, ""))
+        if not p.is_dir():
+            raise HTTPException(400, f"{key} not found: {p}")
+
+    proj_dir.mkdir(parents=True)
+    (proj_dir / "coded").mkdir()
+
+    proj = {
+        "name": name,
+        "slug": slug,
+        "coder_id": body.get("coder_id", ""),
+        "pdf_dir": body["pdf_dir"],
+        "codebook_dir": body["codebook_dir"],
+        "segments_dir": body.get("segments_dir", ""),
+        "trinomial_pattern": body.get("trinomial_pattern", r"(\d{2}[A-Z]{2}\d+)"),
+        "page_dpi": int(body.get("page_dpi", 150)),
+        "project_dir": str(proj_dir),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "last_opened": datetime.now(timezone.utc).isoformat(),
+    }
+    _save_project(proj)
+    return proj
+
+
+@app.post("/api/projects/load")
+async def load_project(body: dict):
+    slug = body.get("slug", "")
+    proj_path = _projects_dir / slug / "project.json"
+    if not proj_path.exists():
+        raise HTTPException(404, f"Project not found: {slug}")
+
+    proj = json.loads(proj_path.read_text(encoding="utf-8"))
+    _load_project_data(proj)
+
+    return {"status": "loaded", "name": proj["name"], "trinomials": len(_trinomials),
+            "traits": len(_traits), "segments": len(_segments)}
+
+
+# ---------------------------------------------------------------------------
+# API — Coding (requires loaded project)
+# ---------------------------------------------------------------------------
+
+def _require_project():
+    if _project is None:
+        raise HTTPException(400, "No project loaded")
 
 
 @app.get("/api/session")
 async def get_session():
+    _require_project()
+
+    work_queue = []
+    for tri in _trinomials:
+        if tri not in _pdf_cache:
+            continue
+        seg_data = _segments.get(tri)
+        if seg_data and seg_data.get("segments"):
+            for seg in seg_data["segments"]:
+                work_queue.append({
+                    "trinomial": tri,
+                    "investigation_label": seg.get("label"),
+                    "investigation_year": seg.get("year"),
+                    "pages": sorted(seg.get("pages", [])),
+                    "form_pages": seg.get("form_pages", []),
+                    "narrative_pages": seg.get("narrative_pages", []),
+                    "nrhp_pages": seg.get("nrhp_pages", []),
+                })
+        else:
+            work_queue.append({
+                "trinomial": tri,
+                "investigation_label": None,
+                "investigation_year": None,
+                "pages": None,
+                "form_pages": [],
+                "narrative_pages": [],
+                "nrhp_pages": [],
+            })
+
     return {
-        "coder_id": _coder_id,
-        "trinomials": _trinomials,
+        "project_name": _project["name"],
+        "coder_id": _project["coder_id"],
+        "work_queue": work_queue,
         "traits": [{"code_id": t["code_id"], "title": t.get("title", t["code_id"]),
                      "data_type": t.get("data_type", "binary"),
                      "categories": t.get("categories", "")} for t in _traits],
         "has_segments": bool(_segments),
-        "run_dir": str(_ensure_run_dir()),
     }
 
 
 @app.get("/api/trinomial/{tri}")
 async def get_trinomial(tri: str):
+    _require_project()
     if tri not in _pdf_cache:
         raise HTTPException(404, f"Trinomial not found: {tri}")
 
@@ -167,9 +295,10 @@ async def get_trinomial(tri: str):
     n_pages = len(doc)
     doc.close()
 
-    existing = _load_existing_results(tri)
     coded_traits: dict[str, dict] = {}
-    if existing:
+    out_path = _coded_dir() / f"{tri}.coded.json"
+    if out_path.exists():
+        existing = json.loads(out_path.read_text(encoding="utf-8"))
         for inv in existing.get("investigations", []):
             inv_key = inv.get("investigation_label") or "all"
             for tr in inv.get("traits", []):
@@ -185,6 +314,7 @@ async def get_trinomial(tri: str):
 
 @app.get("/api/page/{tri}/{page_num}")
 async def get_page_image(tri: str, page_num: int):
+    _require_project()
     if tri not in _pdf_cache:
         raise HTTPException(404, f"Trinomial not found: {tri}")
     pdf_path = _pdf_cache[tri]
@@ -201,6 +331,7 @@ async def get_page_image(tri: str, page_num: int):
 
 @app.get("/api/trait/{code_id}")
 async def get_trait(code_id: str):
+    _require_project()
     for t in _traits:
         if t["code_id"] == code_id:
             return t
@@ -209,9 +340,8 @@ async def get_trait(code_id: str):
 
 @app.post("/api/save/{tri}")
 async def save_result(tri: str, body: dict):
-    """Save or update coded results for a trinomial."""
-    coder_dir = _coder_dir()
-    out_path = coder_dir / f"{tri}.coded.json"
+    _require_project()
+    out_path = _coded_dir() / f"{tri}.coded.json"
 
     existing = None
     if out_path.exists():
@@ -222,7 +352,8 @@ async def save_result(tri: str, body: dict):
     result = {
         "trinomial": tri,
         "investigations": body.get("investigations", []),
-        "coder_id": _coder_id,
+        "coder_id": _project["coder_id"],
+        "project": _project["name"],
         "first_saved": existing["first_saved"] if existing else now,
         "last_saved": now,
     }
@@ -231,95 +362,42 @@ async def save_result(tri: str, body: dict):
     return {"status": "saved", "path": str(out_path)}
 
 
-@app.get("/api/progress")
-async def get_progress():
-    """Return coding progress across all trinomials."""
-    coder_dir = _coder_dir()
-    coded = {}
-    for p in coder_dir.glob("*.coded.json"):
-        data = json.loads(p.read_text(encoding="utf-8"))
-        tri = data["trinomial"]
-        n_traits_coded = 0
-        n_traits_total = 0
-        for inv in data.get("investigations", []):
-            for tr in inv.get("traits", []):
-                n_traits_total += 1
-                if tr.get("trait_value") is not None:
-                    n_traits_coded += 1
-        coded[tri] = {"coded": n_traits_coded, "total": n_traits_total}
-
-    n_traits = len(_traits)
-    total_trinomials = len(_trinomials)
-    completed = sum(1 for tri in _trinomials if tri in coded
-                    and coded[tri]["coded"] >= coded[tri]["total"] and coded[tri]["total"] > 0)
-
-    return {
-        "trinomials_total": total_trinomials,
-        "trinomials_coded": completed,
-        "n_traits": n_traits,
-        "per_trinomial": coded,
-    }
-
-
-app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
+app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
-    global _cfg, _traits, _trinomials, _segments, _pdf_cache
-    global _output_dir, _coder_id, _page_dpi
+def _find_open_port(host: str, preferred: int, max_attempts: int = 20) -> int:
+    for offset in range(max_attempts):
+        port = preferred + offset
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind((host, port))
+                if offset > 0:
+                    print(f"[note] Port {preferred} in use — using {port} instead")
+                return port
+            except OSError:
+                continue
+    sys.exit(f"Could not find an open port in range {preferred}–{preferred + max_attempts - 1}")
 
+
+def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="config.yaml")
-    ap.add_argument("--coder", default=None, help="Coder ID (prompted if not given)")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=8090)
     args = ap.parse_args()
 
-    cfg_path = Path(args.config)
-    if not cfg_path.exists():
-        sys.exit(f"Config not found: {cfg_path}")
-    _cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    _projects_dir.mkdir(exist_ok=True)
 
-    pdf_dir = Path(_cfg["pdf_dir"])
-    codebook_dir = Path(_cfg["codebook_dir"])
-    pattern = _cfg.get("trinomial_pattern", r"(\d{2}[A-Z]{2}\d+)")
+    host = args.host
+    port = _find_open_port(host, args.port)
 
-    _traits = _load_traits(codebook_dir)
-    if not _traits:
-        sys.exit(f"No traits found in: {codebook_dir}")
+    print(f"Projects   : {_projects_dir}")
+    print(f"Server     : http://{host}:{port}")
 
-    _trinomials = _discover_trinomials(pdf_dir, pattern)
-    if not _trinomials:
-        sys.exit(f"No trinomials found in: {pdf_dir}")
-
-    for tri in _trinomials:
-        pdf = _find_pdf(pdf_dir, tri)
-        if pdf:
-            _pdf_cache[tri] = pdf
-
-    seg_dir = _cfg.get("segments_dir")
-    if seg_dir:
-        _segments = _load_segments(Path(seg_dir), pattern)
-        print(f"Segments   : {len(_segments)} trinomials loaded")
-
-    _output_dir = Path(_cfg.get("output_dir", "runs"))
-    _page_dpi = _cfg.get("page_dpi", 150)
-
-    _coder_id = args.coder
-    if not _coder_id:
-        _coder_id = input("Enter coder ID: ").strip()
-    if not _coder_id:
-        sys.exit("Coder ID is required.")
-
-    print(f"Coder      : {_coder_id}")
-    print(f"PDFs       : {len(_pdf_cache)} found")
-    print(f"Traits     : {len(_traits)}")
-    print(f"Trinomials : {len(_trinomials)}")
-    print(f"Server     : http://{_cfg.get('host', '127.0.0.1')}:{_cfg.get('port', 8080)}")
-
-    uvicorn.run(app, host=_cfg.get("host", "127.0.0.1"), port=_cfg.get("port", 8080))
+    uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":

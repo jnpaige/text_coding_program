@@ -1,0 +1,18 @@
+# Test config — 10 sites from chunk_3 with existing segmenter output
+# Run with: uv run python server.py --config config_test.yaml --coder jpaige
+
+# pdf_ocr output root — contains <trinomial>/ subdirs with _ocr.pdf and text_docling.txt
+pdf_dir: 'C:\Users\jpaige\Desktop\local_repositories\2024_forms_chunk_3_surya_docling_5_15_2026\2024_forms_chunk_3_surya_docling_5_15_2026'
+
+# Codebook trait JSON files — output of codebook_tools
+codebook_dir: 'C:\Users\jpaige\Desktop\research_repositories\codebook_tools\test_output\Site_Form_v1.1'
+
+# Segment maps — consolidation of the segmenter test run
+segments_dir: 'C:\Users\jpaige\Desktop\research_repositories\site_coder\test_segments'
+
+trinomial_pattern: '(\d{2}[A-Z]{2}\d+)'
+output_dir: 'runs'
+page_dpi: 150
+
+host: '127.0.0.1'
+port: 8090
