@@ -88,6 +88,8 @@ def build():
             "--hidden-import", "uvicorn.protocols.websockets.auto",
             "--hidden-import", "uvicorn.lifespan",
             "--hidden-import", "uvicorn.lifespan.on",
+            "--hidden-import", "tkinter",
+            "--hidden-import", "tkinter.filedialog",
             "--collect-submodules", "pymupdf",
             "build.py",
         ]
