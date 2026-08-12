@@ -5,3 +5,4 @@ runs/
 dist/
 build/
 *.spec
+CLAUDE.md

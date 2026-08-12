@@ -348,8 +348,8 @@ async function initCoding() {
   workQueue.forEach((u, i) => {
     const opt = document.createElement('option');
     opt.value = i;
-    opt.textContent = u.investigation_label
-      ? `${u.trinomial} — ${u.investigation_label} (${u.investigation_year || '?'})`
+    opt.textContent = u.segment_label
+      ? `${u.trinomial} — ${u.segment_label} (${u.segment_year || '?'})`
       : u.trinomial;
     unitSel.appendChild(opt);
   });
@@ -380,7 +380,8 @@ async function loadUnit(idx) {
   }
 
   if (unit.pages) {
-    const typed = [...new Set([...(unit.form_pages||[]),...(unit.narrative_pages||[]),...(unit.nrhp_pages||[])])].sort((a,b)=>a-b);
+    const groups = Object.values(unit.page_groups || {});
+    const typed = [...new Set(groups.flat())].sort((a,b)=>a-b);
     pageList = typed.length > 0 ? typed : unit.pages.sort((a,b)=>a-b);
   } else {
     pageList = Array.from({length: nTotalPages[unit.trinomial]}, (_,i) => i);
@@ -388,10 +389,10 @@ async function loadUnit(idx) {
 
   const existRes = await fetch(`/api/trinomial/${unit.trinomial}`);
   const existData = await existRes.json();
-  const invLabel = unit.investigation_label || 'all';
+  const segLabel = unit.segment_label || 'all';
   codedResults = {};
   for (const [key, val] of Object.entries(existData.coded_traits || {})) {
-    if (key.startsWith(`${invLabel}::`)) codedResults[key] = val;
+    if (key.startsWith(`${segLabel}::`)) codedResults[key] = val;
   }
 
   currentTraitIdx = 0; currentPageIdx = 0;
@@ -420,8 +421,8 @@ async function showTrait() {
   document.getElementById('codebook-text').textContent = full.full_text || '';
 
   const unit = workQueue[currentUnitIdx];
-  const invLabel = unit.investigation_label || 'all';
-  const existing = codedResults[`${invLabel}::${trait.code_id}`];
+  const segLabel = unit.segment_label || 'all';
+  const existing = codedResults[`${segLabel}::${trait.code_id}`];
 
   const controls = document.getElementById('entry-controls');
   controls.innerHTML = '';
@@ -477,18 +478,18 @@ async function saveAndNext() {
   const value = getEnteredValue();
   if (value === undefined) { alert('Please enter a value.'); return; }
   const unit = workQueue[currentUnitIdx];
-  const invLabel = unit.investigation_label || 'all';
+  const segLabel = unit.segment_label || 'all';
 
-  codedResults[`${invLabel}::${trait.code_id}`] = {
+  codedResults[`${segLabel}::${trait.code_id}`] = {
     trait_key: trait.code_id, trait_value: value, confidence: 1.0,
     justification: document.getElementById('justification').value.trim(),
     evidence_pages: [...pageList],
   };
 
-  const investigations = buildInvestigationsForTri(unit.trinomial);
+  const segments = buildSegmentsForTri(unit.trinomial);
   await fetch(`/api/save/${unit.trinomial}`, {
     method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({investigations}),
+    body: JSON.stringify({segments}),
   });
   advance();
 }
@@ -501,36 +502,36 @@ function advance() {
   else { alert('All units coded!'); }
 }
 
-function buildInvestigationsForTri(tri) {
+function buildSegmentsForTri(tri) {
   const units = workQueue.filter(u => u.trinomial === tri);
-  const invs = [];
+  const segs = [];
   for (const unit of units) {
-    const label = unit.investigation_label || 'all';
+    const label = unit.segment_label || 'all';
     const traits = [];
     for (const [key, val] of Object.entries(codedResults)) {
       if (key.startsWith(`${label}::`)) traits.push(val);
     }
     if (traits.length > 0) {
-      invs.push({ file_trinomial: tri, investigation_label: unit.investigation_label,
-                   investigation_year: unit.investigation_year, traits });
+      segs.push({ file_trinomial: tri, segment_label: unit.segment_label,
+                   segment_year: unit.segment_year, traits });
     }
   }
-  return invs;
+  return segs;
 }
 
 function updateProgress() {
   const unit = workQueue[currentUnitIdx];
-  const invLabel = unit?.investigation_label || 'all';
+  const segLabel = unit?.segment_label || 'all';
   const currentCode = session?.traits?.[currentTraitIdx]?.code_id;
   let coded = 0;
   const total = session?.traits?.length || 0;
   const list = document.getElementById('progress-list');
   list.innerHTML = '';
   document.getElementById('progress-header').textContent =
-    `Traits — ${unit?.trinomial||''} ${invLabel !== 'all' ? '/ '+invLabel : ''}`;
+    `Traits — ${unit?.trinomial||''} ${segLabel !== 'all' ? '/ '+segLabel : ''}`;
 
   (session?.traits||[]).forEach((t, i) => {
-    const key = `${invLabel}::${t.code_id}`;
+    const key = `${segLabel}::${t.code_id}`;
     const isDone = !!codedResults[key]; if (isDone) coded++;
     const isCurrent = t.code_id === currentCode;
     const div = document.createElement('div');

@@ -150,8 +150,8 @@ def _count_progress(proj: dict) -> dict:
     for f in coded_files:
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
-            for inv in data.get("investigations", []):
-                n_traits += len(inv.get("traits", []))
+            for seg in data.get("segments", []):
+                n_traits += len(seg.get("traits", []))
         except Exception:
             pass
     return {"coded_files": len(coded_files), "coded_traits": n_traits}
@@ -164,6 +164,42 @@ def _count_progress(proj: dict) -> dict:
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return FileResponse(_static_dir / "index.html")
+
+
+def _config_snapshot_no_paths(cfg: dict) -> dict:
+    """Strip path-shaped keys (input_dir, codebook_file, etc.) from a config
+    snapshot — the paths in a run's own config.yaml describe where that run's
+    creator found its inputs, which may not exist or may be stale relative to
+    wherever segments_dir/codebook_dir actually point to now."""
+    return {k: v for k, v in cfg.items() if not re.search(r"dir|file|path", k, re.I)}
+
+
+def _find_run_provenance(segments_dir: Path) -> dict | None:
+    """Look for a segmenter run's frozen run_metadata.json + config snapshot,
+    checking segments_dir itself (current flat run-folder layout) and its
+    parent (older per-model-subfolder layout). Returns None if neither has one
+    — that's an accurate "not available for this run", not an error."""
+    for candidate in (segments_dir, segments_dir.parent):
+        meta_path = candidate / "run_metadata.json"
+        if not meta_path.is_file():
+            continue
+        result = {"run_metadata": json.loads(meta_path.read_text(encoding="utf-8"))}
+        config_files = [p for p in candidate.glob("*.yaml") if p.name != "prompts.yaml"]
+        if config_files:
+            cfg = yaml.safe_load(config_files[0].read_text(encoding="utf-8")) or {}
+            result["config_snapshot"] = _config_snapshot_no_paths(cfg)
+        return result
+    return None
+
+
+def _find_codebook_summary(codebook_dir: Path) -> dict | None:
+    """codebook_tools writes a codebook_summary_<version>.json (name, version,
+    parse_date, code_ids) alongside each codebook's per-trait JSON files — pure
+    identity info, no paths, safe to snapshot as-is."""
+    matches = list(codebook_dir.glob("codebook_summary_*.json"))
+    if not matches:
+        return None
+    return json.loads(matches[0].read_text(encoding="utf-8"))
 
 
 @app.get("/api/projects")
@@ -200,18 +236,37 @@ async def create_project(body: dict):
     proj_dir.mkdir(parents=True)
     (proj_dir / "coded").mkdir()
 
+    # Frozen provenance snapshot — captured once, at creation time, and never
+    # re-read afterward. Kept separate from the live pdf_dir/codebook_dir/
+    # segments_dir fields below, which are what the program actually operates
+    # on: this block can go stale if the source directories move, but nothing
+    # here ever gets treated as authoritative for locating files.
+    provenance = {
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "note": ("Frozen at project creation — not re-read; may not reflect "
+                 "the source directories' current contents if they were "
+                 "later modified or moved."),
+        "codebook_summary": _find_codebook_summary(Path(body["codebook_dir"])),
+    }
+    segments_dir_val = body.get("segments_dir", "")
+    if segments_dir_val:
+        run_provenance = _find_run_provenance(Path(segments_dir_val))
+        if run_provenance:
+            provenance.update(run_provenance)
+
     proj = {
         "name": name,
         "slug": slug,
         "coder_id": body.get("coder_id", ""),
         "pdf_dir": body["pdf_dir"],
         "codebook_dir": body["codebook_dir"],
-        "segments_dir": body.get("segments_dir", ""),
+        "segments_dir": segments_dir_val,
         "trinomial_pattern": body.get("trinomial_pattern", r"(\d{2}[A-Z]{2}\d+)"),
         "page_dpi": int(body.get("page_dpi", 150)),
         "project_dir": str(proj_dir),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "last_opened": datetime.now(timezone.utc).isoformat(),
+        "provenance": provenance,
     }
     _save_project(proj)
     return proj
@@ -280,24 +335,26 @@ async def get_session():
         seg_data = _segments.get(tri)
         if seg_data and seg_data.get("segments"):
             for seg in seg_data["segments"]:
+                # Page-type sidecars vary by segment type (form_pages/narrative_pages/
+                # nrhp_pages for site forms; dynamically-named <section_type>_pages for
+                # report structural passes) — collect whatever's actually present rather
+                # than assuming fixed names, so this works for any segmenter output.
+                page_groups = {k: v for k, v in seg.items()
+                               if k.endswith("_pages") and k != "pages"}
                 work_queue.append({
                     "trinomial": tri,
-                    "investigation_label": seg.get("label"),
-                    "investigation_year": seg.get("year"),
+                    "segment_label": seg.get("label"),
+                    "segment_year": seg.get("year"),
                     "pages": sorted(seg.get("pages", [])),
-                    "form_pages": seg.get("form_pages", []),
-                    "narrative_pages": seg.get("narrative_pages", []),
-                    "nrhp_pages": seg.get("nrhp_pages", []),
+                    "page_groups": page_groups,
                 })
         else:
             work_queue.append({
                 "trinomial": tri,
-                "investigation_label": None,
-                "investigation_year": None,
+                "segment_label": None,
+                "segment_year": None,
                 "pages": None,
-                "form_pages": [],
-                "narrative_pages": [],
-                "nrhp_pages": [],
+                "page_groups": {},
             })
 
     return {
@@ -318,7 +375,7 @@ async def get_trinomial(tri: str):
         raise HTTPException(404, f"Trinomial not found: {tri}")
 
     seg_data = _segments.get(tri)
-    segments = seg_data.get("segments", []) if seg_data else []
+    segment_defs = seg_data.get("segments", []) if seg_data else []
 
     pdf_path = _pdf_cache[tri]
     doc = pymupdf.open(str(pdf_path))
@@ -329,15 +386,15 @@ async def get_trinomial(tri: str):
     out_path = _coded_dir() / f"{tri}.coded.json"
     if out_path.exists():
         existing = json.loads(out_path.read_text(encoding="utf-8"))
-        for inv in existing.get("investigations", []):
-            inv_key = inv.get("investigation_label") or "all"
-            for tr in inv.get("traits", []):
-                coded_traits[f"{inv_key}::{tr['trait_key']}"] = tr
+        for seg in existing.get("segments", []):
+            seg_key = seg.get("segment_label") or "all"
+            for tr in seg.get("traits", []):
+                coded_traits[f"{seg_key}::{tr['trait_key']}"] = tr
 
     return {
         "trinomial": tri,
         "n_pages": n_pages,
-        "segments": segments,
+        "segment_defs": segment_defs,
         "coded_traits": coded_traits,
     }
 
@@ -379,9 +436,23 @@ async def save_result(tri: str, body: dict):
 
     now = datetime.now(timezone.utc).isoformat()
 
+    # Merge incoming segments into existing ones by segment_label rather than
+    # replacing the whole array — the client only ever round-trips the
+    # segment label(s) currently in view, so a naive overwrite would silently
+    # discard previously-saved segments for this trinomial. segment_label is
+    # treated as an opaque key here — it works the same whether a segment is
+    # a site investigation, a report structural section, or a narrowed
+    # per-trinomial pass; nothing here assumes what kind of segment it is.
+    by_label: dict = {}
+    if existing:
+        for seg in existing.get("segments", []):
+            by_label[seg.get("segment_label")] = seg
+    for seg in body.get("segments", []):
+        by_label[seg.get("segment_label")] = seg
+
     result = {
         "trinomial": tri,
-        "investigations": body.get("investigations", []),
+        "segments": list(by_label.values()),
         "coder_id": _project["coder_id"],
         "project": _project["name"],
         "first_saved": existing["first_saved"] if existing else now,

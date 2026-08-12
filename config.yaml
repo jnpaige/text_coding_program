@@ -7,7 +7,7 @@ pdf_dir: 'C:\Users\jpaige\Desktop\local_repositories\2024_forms_chunk_3_surya_do
 codebook_dir: 'C:\Users\jpaige\Desktop\research_repositories\codebook_tools\test_output\Site_Form_v1.1'
 
 # Segment map (optional) — segmenter run output dir with <trinomial>.segments.json
-# When set, the viewer filters pages to the relevant investigation pages.
+# When set, the viewer filters pages to the relevant segment's pages.
 # Leave empty or omit to show all pages.
 segments_dir: ''
 
