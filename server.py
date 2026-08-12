@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import asyncio
 import json
 import re
 import socket
@@ -214,6 +215,35 @@ async def create_project(body: dict):
     }
     _save_project(proj)
     return proj
+
+
+def _browse_folder_dialog(initial_dir: str = "") -> str:
+    """Open a native OS folder-picker dialog and return the chosen path (empty
+    string if the user cancels). Only meaningful because this server and the
+    browser hitting it are always the same machine (127.0.0.1, one process
+    per user) — a real hosted deployment couldn't do this, the dialog would
+    pop up on the server's screen, not the client's."""
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    root.update()
+    path = filedialog.askdirectory(initialdir=initial_dir or None, parent=root)
+    root.destroy()
+    return path
+
+
+@app.post("/api/browse-folder")
+async def browse_folder(body: dict):
+    initial_dir = body.get("initial_dir", "")
+    try:
+        loop = asyncio.get_event_loop()
+        path = await loop.run_in_executor(None, _browse_folder_dialog, initial_dir)
+    except Exception as e:
+        raise HTTPException(500, f"Could not open folder browser: {e}")
+    return {"path": path}
 
 
 @app.post("/api/projects/load")

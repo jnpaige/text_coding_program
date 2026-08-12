@@ -1,0 +1,8 @@
+warning: `VIRTUAL_ENV=C:\Users\jpaige\Desktop\research_repositories\codebook_tools\.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
+INFO:     Started server process [27932]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8099 (Press CTRL+C to quit)
+Projects   : C:\Users\jpaige\Desktop\research_repositories\text_coding_program\projects
+Server     : http://127.0.0.1:8099
+INFO:     127.0.0.1:52935 - "GET /openapi.json HTTP/1.1" 200 OK

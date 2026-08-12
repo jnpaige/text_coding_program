@@ -26,6 +26,10 @@
   .form-row input { background: #0f172a; color: #e0e0e0; border: 1px solid #334155; padding: 8px 12px; border-radius: 6px; width: 100%; font-size: 14px; }
   .form-row input:focus { border-color: #60a5fa; outline: none; }
   .form-row .hint { font-size: 11px; color: #475569; margin-top: 2px; }
+  .form-row .path-row { display: flex; gap: 8px; }
+  .form-row .path-row input { flex: 1; min-width: 0; }
+  .btn-browse { background: #334155; color: #e0e0e0; border: 1px solid #475569; padding: 8px 14px; border-radius: 6px; font-size: 13px; cursor: pointer; white-space: nowrap; }
+  .btn-browse:hover { background: #475569; }
   #btn-create { background: #2563eb; color: white; border: none; padding: 10px 24px; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; width: 100%; margin-top: 8px; }
   #btn-create:hover { background: #1d4ed8; }
   #create-error { color: #f87171; font-size: 13px; margin-top: 8px; display: none; }
@@ -115,17 +119,26 @@
       </div>
       <div class="form-row">
         <label>PDF / OCR output directory</label>
-        <input type="text" id="new-pdf-dir" placeholder="C:\...\2024_forms_chunk_3_surya_docling">
+        <div class="path-row">
+          <input type="text" id="new-pdf-dir" placeholder="C:\...\2024_forms_chunk_3_surya_docling">
+          <button type="button" class="btn-browse" onclick="browseFolder('new-pdf-dir')">Browse&hellip;</button>
+        </div>
         <div class="hint">Contains trinomial subdirectories with _ocr.pdf files (from pdf_ocr)</div>
       </div>
       <div class="form-row">
         <label>Codebook directory</label>
-        <input type="text" id="new-codebook-dir" placeholder="C:\...\Site_Form_v1.1">
+        <div class="path-row">
+          <input type="text" id="new-codebook-dir" placeholder="C:\...\Site_Form_v1.1">
+          <button type="button" class="btn-browse" onclick="browseFolder('new-codebook-dir')">Browse&hellip;</button>
+        </div>
         <div class="hint">Per-trait JSON files from codebook_tools</div>
       </div>
       <div class="form-row">
         <label>Segments directory (optional)</label>
-        <input type="text" id="new-segments-dir" placeholder="C:\...\segmenter_run\text__qwen2.5_14b">
+        <div class="path-row">
+          <input type="text" id="new-segments-dir" placeholder="C:\...\segmenter_run\text__qwen2.5_14b">
+          <button type="button" class="btn-browse" onclick="browseFolder('new-segments-dir')">Browse&hellip;</button>
+        </div>
         <div class="hint">Contains .segments.json files from site_form_segmenter</div>
       </div>
       <button id="btn-create" onclick="createProject()">Create Project</button>
@@ -214,6 +227,30 @@ async function loadProjectList() {
     `;
     card.onclick = () => openProject(proj.slug);
     list.appendChild(card);
+  }
+}
+
+async function browseFolder(inputId) {
+  const input = document.getElementById(inputId);
+  const errEl = document.getElementById('create-error');
+  errEl.style.display = 'none';
+
+  const res = await fetch('/api/browse-folder', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({initial_dir: input.value}),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    errEl.textContent = err.detail || 'Could not open folder browser.';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  const data = await res.json();
+  if (data.path) {
+    input.value = data.path;
   }
 }
 
