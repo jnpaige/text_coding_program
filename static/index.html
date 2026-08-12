@@ -390,10 +390,10 @@ async function loadUnit(idx) {
 
   const existRes = await fetch(`/api/trinomial/${unit.trinomial}`);
   const existData = await existRes.json();
-  const segLabel = unit.segment_label || 'all';
+  const segKey = unit.segment_key || 'all';
   codedResults = {};
   for (const [key, val] of Object.entries(existData.coded_traits || {})) {
-    if (key.startsWith(`${segLabel}::`)) codedResults[key] = val;
+    if (key.startsWith(`${segKey}::`)) codedResults[key] = val;
   }
 
   currentTraitIdx = 0; currentPageIdx = 0;
@@ -422,8 +422,8 @@ async function showTrait() {
   document.getElementById('codebook-text').textContent = full.full_text || '';
 
   const unit = workQueue[currentUnitIdx];
-  const segLabel = unit.segment_label || 'all';
-  const existing = codedResults[`${segLabel}::${trait.code_id}`];
+  const segKey = unit.segment_key || 'all';
+  const existing = codedResults[`${segKey}::${trait.code_id}`];
 
   const controls = document.getElementById('entry-controls');
   controls.innerHTML = '';
@@ -490,9 +490,9 @@ async function saveAndNext() {
   const value = getEnteredValue();
   if (value === undefined) { alert('Please enter a value.'); return; }
   const unit = workQueue[currentUnitIdx];
-  const segLabel = unit.segment_label || 'all';
+  const segKey = unit.segment_key || 'all';
 
-  codedResults[`${segLabel}::${trait.code_id}`] = {
+  codedResults[`${segKey}::${trait.code_id}`] = {
     trait_key: trait.code_id, trait_value: value, confidence: 1.0,
     justification: document.getElementById('justification').value.trim(),
     evidence_pages: [...pageList],
@@ -518,14 +518,15 @@ function buildSegmentsForTri(tri) {
   const units = workQueue.filter(u => u.trinomial === tri);
   const segs = [];
   for (const unit of units) {
-    const label = unit.segment_label || 'all';
+    const key = unit.segment_key || 'all';
     const traits = [];
-    for (const [key, val] of Object.entries(codedResults)) {
-      if (key.startsWith(`${label}::`)) traits.push(val);
+    for (const [k, val] of Object.entries(codedResults)) {
+      if (k.startsWith(`${key}::`)) traits.push(val);
     }
     if (traits.length > 0) {
       segs.push({ file_trinomial: tri, segment_label: unit.segment_label,
-                   segment_year: unit.segment_year, traits });
+                   segment_year: unit.segment_year, segment_index: unit.segment_index,
+                   traits });
     }
   }
   return segs;
@@ -533,17 +534,17 @@ function buildSegmentsForTri(tri) {
 
 function updateProgress() {
   const unit = workQueue[currentUnitIdx];
-  const segLabel = unit?.segment_label || 'all';
+  const segKey = unit?.segment_key || 'all';
   const currentCode = session?.traits?.[currentTraitIdx]?.code_id;
   let coded = 0;
   const total = session?.traits?.length || 0;
   const list = document.getElementById('progress-list');
   list.innerHTML = '';
   document.getElementById('progress-header').textContent =
-    `Traits — ${unit?.trinomial||''} ${segLabel !== 'all' ? '/ '+segLabel : ''}`;
+    `Traits — ${unit?.trinomial||''} ${unit?.segment_label ? '/ '+unit.segment_label : ''}`;
 
   (session?.traits||[]).forEach((t, i) => {
-    const key = `${segLabel}::${t.code_id}`;
+    const key = `${segKey}::${t.code_id}`;
     const isDone = !!codedResults[key]; if (isDone) coded++;
     const isCurrent = t.code_id === currentCode;
     const div = document.createElement('div');

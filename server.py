@@ -102,6 +102,32 @@ def _load_segments(segments_dir: Path, pattern: str) -> dict[str, dict]:
     return segs
 
 
+def _segment_key(seg: dict, fallback_index: int) -> str:
+    """Stable key for deduping/matching one trinomial's segments.
+
+    A segment's human-authored label (site_form_segmenter's free-text
+    `label`/`segment_label` field) is used directly when present — this
+    keeps every already-saved file's keys unchanged. Labels are not
+    guaranteed unique or even present, though (a segment can legitimately
+    have no label, and nothing enforces distinct labels across segments in
+    one segments.json) — so when the label is empty, fall back to a
+    position-based key instead of collapsing every unlabeled segment onto
+    the same 'all' bucket, which previously caused unrelated segments for
+    the same trinomial to silently overwrite each other's coded traits.
+    `segment_index`, when present on the dict, is preferred over
+    `fallback_index` since it reflects the segment's live position in
+    segments.json rather than wherever it happens to sit in a persisted
+    file.
+    """
+    label = seg.get("segment_label") or seg.get("label")
+    if label:
+        return label
+    idx = seg.get("segment_index")
+    if idx is None:
+        idx = fallback_index
+    return f"__unlabeled_{idx}__"
+
+
 def _coded_dir() -> Path:
     d = Path(_project["project_dir"]) / "coded"
     d.mkdir(parents=True, exist_ok=True)
@@ -334,7 +360,7 @@ async def get_session():
             continue
         seg_data = _segments.get(tri)
         if seg_data and seg_data.get("segments"):
-            for seg in seg_data["segments"]:
+            for i, seg in enumerate(seg_data["segments"]):
                 # Page-type sidecars vary by segment type (form_pages/narrative_pages/
                 # nrhp_pages for site forms; dynamically-named <section_type>_pages for
                 # report structural passes) — collect whatever's actually present rather
@@ -345,6 +371,8 @@ async def get_session():
                     "trinomial": tri,
                     "segment_label": seg.get("label"),
                     "segment_year": seg.get("year"),
+                    "segment_index": i,
+                    "segment_key": _segment_key(seg, i),
                     "pages": sorted(seg.get("pages", [])),
                     "page_groups": page_groups,
                 })
@@ -353,6 +381,8 @@ async def get_session():
                 "trinomial": tri,
                 "segment_label": None,
                 "segment_year": None,
+                "segment_index": None,
+                "segment_key": "all",
                 "pages": None,
                 "page_groups": {},
             })
@@ -386,8 +416,8 @@ async def get_trinomial(tri: str):
     out_path = _coded_dir() / f"{tri}.coded.json"
     if out_path.exists():
         existing = json.loads(out_path.read_text(encoding="utf-8"))
-        for seg in existing.get("segments", []):
-            seg_key = seg.get("segment_label") or "all"
+        for i, seg in enumerate(existing.get("segments", [])):
+            seg_key = _segment_key(seg, i)
             for tr in seg.get("traits", []):
                 coded_traits[f"{seg_key}::{tr['trait_key']}"] = tr
 
@@ -436,23 +466,26 @@ async def save_result(tri: str, body: dict):
 
     now = datetime.now(timezone.utc).isoformat()
 
-    # Merge incoming segments into existing ones by segment_label rather than
-    # replacing the whole array — the client only ever round-trips the
-    # segment label(s) currently in view, so a naive overwrite would silently
-    # discard previously-saved segments for this trinomial. segment_label is
-    # treated as an opaque key here — it works the same whether a segment is
-    # a site investigation, a report structural section, or a narrowed
-    # per-trinomial pass; nothing here assumes what kind of segment it is.
-    by_label: dict = {}
+    # Merge incoming segments into existing ones by a stable per-segment key
+    # rather than replacing the whole array — the client only ever
+    # round-trips the segment(s) currently in view, so a naive overwrite
+    # would silently discard previously-saved segments for this trinomial.
+    # The key prefers segment_label (works the same whether a segment is a
+    # site investigation, a report structural section, or a narrowed
+    # per-trinomial pass — nothing here assumes what kind of segment it is)
+    # but falls back to a position-based key when the label is empty, so
+    # multiple unlabeled segments for one trinomial no longer collide onto
+    # the same key and silently overwrite each other's traits.
+    by_key: dict = {}
     if existing:
-        for seg in existing.get("segments", []):
-            by_label[seg.get("segment_label")] = seg
-    for seg in body.get("segments", []):
-        by_label[seg.get("segment_label")] = seg
+        for i, seg in enumerate(existing.get("segments", [])):
+            by_key[_segment_key(seg, i)] = seg
+    for i, seg in enumerate(body.get("segments", [])):
+        by_key[_segment_key(seg, i)] = seg
 
     result = {
         "trinomial": tri,
-        "segments": list(by_label.values()),
+        "segments": list(by_key.values()),
         "coder_id": _project["coder_id"],
         "project": _project["name"],
         "first_saved": existing["first_saved"] if existing else now,
