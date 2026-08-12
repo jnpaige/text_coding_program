@@ -20,7 +20,7 @@ See [pdf_ocr](https://github.com/jnpaige/pdf_ocr) for more detail about this wor
 A single-page web app served locally that presents:
 
 - **Left panel** — PDF page viewer with page navigation (arrow keys or buttons). Pages are scoped to the current segment using the segment map: any key in a segment ending in `_pages` (besides the base `pages` list itself) is treated as a named page group and unioned to build the scoped page list — `form_pages`/`narrative_pages`/`nrhp_pages` for site forms, or whatever dynamically-named `<section_type>_pages` keys a report-structural segmenter pass produced (see `segment_reports_pass0.py`). No group present → falls back to showing the segment's full `pages` list.
-- **Right panel** — Full codebook entry text for the current trait, plus data entry controls (radio buttons for binary, text input for numeric, radio buttons for categorical) and a justification field.
+- **Right panel** — Full codebook entry text for the current trait, plus data entry controls (radio buttons for binary, text input for numeric, radio buttons for categorical, checkboxes for list) and a justification field.
 - **Unit selector** — Dropdown showing each `(trinomial, segment)` pair from the segment map (e.g., "16VN1000 — Initial Survey (1997)").
 - **Progress sidebar** — Shows which traits have been coded for the current segment, with click-to-jump navigation.
 

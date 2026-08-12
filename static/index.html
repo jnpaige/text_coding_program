@@ -77,6 +77,7 @@
   .radio-group label.selected { border-color: #60a5fa; background: #1e3a5f; }
   .radio-group .key-hint { font-size: 14px; color: #64748b; font-weight: 600; margin-right: 4px; }
   .radio-group input[type="radio"] { accent-color: #60a5fa; width: 20px; height: 20px; }
+  .radio-group input[type="checkbox"] { accent-color: #60a5fa; width: 20px; height: 20px; }
   input[type="text"], input[type="number"], textarea { background: #1a1a2e; color: #e0e0e0; border: 1px solid #334155; padding: 6px 10px; border-radius: 4px; width: 100%; font-size: 13px; }
   textarea { resize: vertical; min-height: 48px; }
   #entry-buttons { display: flex; gap: 8px; margin-top: 12px; }
@@ -437,6 +438,14 @@ async function showTrait() {
     </div>`;
   } else if (dt.startsWith('numeric')) {
     row.innerHTML = `<label>Value:</label><input type="text" id="trait_value_input" placeholder="Number or 'unknown'" value="${existing?.trait_value ?? ''}">`;
+  } else if (dt === 'list') {
+    const cats = (trait.categories||'').split(/\n/).map(c=>c.trim()).filter(Boolean);
+    const catLabels = cats.map(c => { const m=c.match(/^([^:]+)/); return m?m[1].trim():c; });
+    const existingArr = Array.isArray(existing?.trait_value) ? existing.trait_value : [];
+    let html = '<div class="radio-group" style="flex-wrap:wrap">';
+    catLabels.forEach((c,i) => { html += `<label><input type="checkbox" name="trait_value" value="${c}" ${existingArr.includes(c)?'checked':''}><span class="key-hint">[${i+1}]</span> ${c}</label>`; });
+    html += '</div>';
+    row.innerHTML = html;
   } else {
     const cats = (trait.categories||'').split(/\n/).map(c=>c.trim()).filter(Boolean);
     const catLabels = cats.map(c => { const m=c.match(/^([^:]+)/); return m?m[1].trim():c; });
@@ -465,6 +474,9 @@ function getEnteredValue() {
     const v = document.getElementById('trait_value_input').value.trim();
     if (!v) return undefined;
     const n = parseFloat(v); return isNaN(n) ? v : n;
+  } else if (dt === 'list') {
+    const checked = document.querySelectorAll('input[name="trait_value"]:checked');
+    return Array.from(checked).map(c => c.value);
   } else {
     const c = document.querySelector('input[name="trait_value"]:checked');
     if (c) return c.value;
@@ -546,7 +558,7 @@ function updateProgress() {
 
 function _updateRadioHighlights() {
   document.querySelectorAll('.radio-group label').forEach(lbl => {
-    const r = lbl.querySelector('input[type="radio"]');
+    const r = lbl.querySelector('input[type="radio"], input[type="checkbox"]');
     lbl.classList.toggle('selected', r?.checked);
   });
 }
@@ -562,9 +574,14 @@ document.addEventListener('keydown', (e) => {
   if (e.key === '-' && !document.activeElement.matches('input,textarea')) { e.preventDefault(); zoomOut(); }
   if (e.key === '0' && !document.activeElement.matches('input,textarea')) { e.preventDefault(); zoomFit(); }
   if (e.key >= '1' && e.key <= '9' && !document.activeElement.matches('input[type="text"],input[type="number"],textarea')) {
-    const radios = document.querySelectorAll('input[name="trait_value"]');
+    const inputs = document.querySelectorAll('input[name="trait_value"]');
     const idx = parseInt(e.key) - 1;
-    if (idx < radios.length) { radios[idx].checked = true; radios[idx].dispatchEvent(new Event('change',{bubbles:true})); e.preventDefault(); }
+    if (idx < inputs.length) {
+      const el = inputs[idx];
+      el.checked = el.type === 'checkbox' ? !el.checked : true;
+      el.dispatchEvent(new Event('change',{bubbles:true}));
+      e.preventDefault();
+    }
   }
 });
 
