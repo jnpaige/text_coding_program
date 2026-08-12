@@ -259,6 +259,21 @@ async def create_project(body: dict):
         if not p.is_dir():
             raise HTTPException(400, f"{key} not found: {p}")
 
+    segments_dir_raw = body.get("segments_dir", "").strip()
+    if segments_dir_raw:
+        seg_p = Path(segments_dir_raw)
+        if not seg_p.is_dir():
+            raise HTTPException(400, f"segments_dir not found: {seg_p}")
+        if not any(seg_p.glob("*.segments.json")):
+            raise HTTPException(
+                400,
+                f"segments_dir has no *.segments.json files directly in it: {seg_p}\n"
+                "site_form_segmenter writes these one level deeper, inside a "
+                "run folder (runs/<timestamp>_<gitsha>/) — point segments_dir "
+                "at that run folder itself, not its parent. Proceeding without "
+                "fixing this would silently create a project with no segments."
+            )
+
     proj_dir.mkdir(parents=True)
     (proj_dir / "coded").mkdir()
 
