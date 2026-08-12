@@ -102,9 +102,46 @@ def build():
     # Ensure projects/ dir exists in the dist
     (dist_dir / "projects").mkdir(exist_ok=True)
 
+    shortcut_path = _create_shortcut(dist_dir)
+
     print(f"\nBuild complete: {dist_dir}")
     print(f"To distribute: zip the '{dist_dir}' folder and share it.")
     print(f"Users double-click text_coding_program.exe to start.")
+
+    if shortcut_path:
+        _notify_shortcut(shortcut_path)
+
+
+def _create_shortcut(dist_dir: Path) -> Path | None:
+    """Create a .lnk shortcut next to the dist folder. Returns the shortcut path, or None on failure."""
+    exe = (dist_dir / "text_coding_program.exe").resolve()
+    shortcut = (dist_dir.parent / "Text Coding Program.lnk").resolve()
+    ps = (
+        f'$ws = New-Object -ComObject WScript.Shell; '
+        f'$s = $ws.CreateShortcut("{shortcut}"); '
+        f'$s.TargetPath = "{exe}"; '
+        f'$s.WorkingDirectory = "{exe.parent}"; '
+        f'$s.Description = "Text Coding Program"; '
+        f'$s.Save()'
+    )
+    result = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True)
+    if result.returncode == 0 and shortcut.exists():
+        print(f"Shortcut created: {shortcut}")
+        return shortcut
+    print(f"Warning: could not create shortcut ({result.stderr.decode().strip()})")
+    return None
+
+
+def _notify_shortcut(shortcut_path: Path) -> None:
+    """Show a message box prompting the user to place the shortcut."""
+    import ctypes
+    msg = (
+        f"A shortcut has been created at:\n\n"
+        f"{shortcut_path}\n\n"
+        f"Copy or drag it wherever you'd like to launch the program\n"
+        f"(Desktop, taskbar, Start menu, etc.)."
+    )
+    ctypes.windll.user32.MessageBoxW(0, msg, "Text Coding Program — Build Complete", 0x40)
 
 
 if __name__ == "__main__":
