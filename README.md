@@ -196,8 +196,6 @@ This produces `dist/text_coding_program/` (~70 MB) containing the exe, Python ru
 
 **Yes, the `dist/text_coding_program/` folder itself** — copy or move it to any location, on this machine or another, and `text_coding_program.exe` still works. It locates `static/`, `projects/`, etc. relative to its own current location at runtime (`Path(sys.executable).parent` in `build.py`'s `launch()`), not a path baked in at build time. Zip it, unzip it elsewhere, done — matches the existing "self-contained, zip it and distribute" note above.
 
-**No, the shortcut is not portable on its own.** `Text Coding Program.lnk` has an absolute path to the exe's location *at build time* baked into it (`build.py`'s `_create_shortcut`). Two consequences:
-
 - Moving just the shortcut (e.g., dragging it to the Desktop) is fine — it still points back at the same `dist/text_coding_program/` folder, wherever that is.
 - Moving or renaming the `dist/text_coding_program/` folder *after* the shortcut was created breaks it — the shortcut keeps pointing at the old path. Rebuild (regenerates both the folder and a shortcut matching its new location) rather than trying to hand-fix the `.lnk`.
 
