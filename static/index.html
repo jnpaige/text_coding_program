@@ -35,6 +35,30 @@
   #create-error { color: #f87171; font-size: 13px; margin-top: 8px; display: none; }
   #no-projects { color: #475569; font-size: 13px; font-style: italic; }
 
+  /* Export / import */
+  .proj-card { position: relative; }
+  .btn-export { position: absolute; top: 12px; right: 12px; background: #334155; color: #cbd5e1; border: 1px solid #475569; padding: 4px 10px; border-radius: 5px; font-size: 12px; cursor: pointer; }
+  .btn-export:hover { background: #475569; color: #fff; }
+  #modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 300; display: none; justify-content: center; align-items: flex-start; padding-top: 100px; }
+  #modal-backdrop.open { display: flex; }
+  .modal { background: #16213e; border: 1px solid #334155; border-radius: 12px; padding: 24px; width: 540px; max-height: 76vh; overflow-y: auto; }
+  .modal h2 { color: #60a5fa; font-size: 18px; margin-bottom: 4px; }
+  .modal .modal-sub { color: #64748b; font-size: 12px; margin-bottom: 18px; }
+  .modal select { background: #0f172a; color: #e0e0e0; border: 1px solid #334155; padding: 8px 12px; border-radius: 6px; width: 100%; font-size: 13px; }
+  .modal-buttons { display: flex; gap: 8px; margin-top: 18px; }
+  .modal-buttons button { flex: 1; padding: 10px; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; border: none; }
+  .btn-primary { background: #2563eb; color: #fff; }
+  .btn-primary:hover { background: #1d4ed8; }
+  .btn-primary:disabled { opacity: 0.5; cursor: default; }
+  .btn-cancel { background: #334155; color: #e0e0e0; }
+  .btn-cancel:hover { background: #475569; }
+  .modal-status { font-size: 13px; margin-top: 14px; line-height: 1.5; display: none; }
+  .modal-status.show { display: block; }
+  .modal-status.err { color: #f87171; }
+  .modal-status.ok { color: #4ade80; }
+  .modal-status .path { color: #cbd5e1; font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; display: block; margin-top: 6px; }
+  .modal-status .warn { color: #facc15; display: block; margin-top: 8px; font-size: 12px; }
+
   /* Top bar */
   #topbar { background: #16213e; padding: 8px 16px; display: flex; align-items: center; gap: 16px; border-bottom: 1px solid #0f3460; flex-shrink: 0; flex-wrap: wrap; }
   .tb-label { color: #94a3b8; font-size: 13px; }
@@ -148,6 +172,31 @@
   </div>
 </div>
 
+<!-- ============ EXPORT MODAL ============ -->
+<div id="modal-backdrop">
+  <div class="modal" id="export-modal">
+    <h2>Export results</h2>
+    <p class="modal-sub" id="export-sub"></p>
+    <div class="form-row">
+      <label>Destination folder</label>
+      <div class="path-row">
+        <input type="text" id="export-dest" placeholder="Choose where the export folder is created">
+        <button type="button" class="btn-browse" onclick="browseInto('export-dest')">Browse&hellip;</button>
+      </div>
+      <div class="hint">A new <code>&lt;project&gt;_export_&lt;date&gt;</code> folder is created inside it</div>
+    </div>
+    <p class="modal-sub" style="margin:0">
+      Writes the coded results (CSV + JSON), the codebook definitions, and the
+      project metadata. Source PDFs and the segment map are not included.
+    </p>
+    <div class="modal-buttons">
+      <button class="btn-cancel" onclick="closeModal()">Cancel</button>
+      <button class="btn-primary" id="export-go" onclick="runExport()">Export</button>
+    </div>
+    <div class="modal-status" id="export-status"></div>
+  </div>
+</div>
+
 <!-- ============ CODING UI ============ -->
 <div id="coding-ui">
   <div id="topbar">
@@ -225,8 +274,15 @@ async function loadProjectList() {
       <div class="proj-name">${proj.name}</div>
       <div class="proj-meta">Coder: ${proj.coder_id} &middot; Last opened: ${lastOpened}</div>
       <div class="proj-progress">${prog.coded_files || 0} sites coded &middot; ${prog.coded_traits || 0} trait entries</div>
+      <button type="button" class="btn-export">Export&hellip;</button>
     `;
     card.onclick = () => openProject(proj.slug);
+    // The export button sits inside the card, whose click opens the project —
+    // without this the picker would vanish behind the modal.
+    card.querySelector('.btn-export').onclick = (e) => {
+      e.stopPropagation();
+      openExportModal(proj.slug, proj.name);
+    };
     list.appendChild(card);
   }
 }
@@ -254,6 +310,95 @@ async function browseFolder(inputId) {
     input.value = data.path;
   }
 }
+
+// ===================== EXPORT / IMPORT =====================
+
+// Folder picker for the modals. browseFolder() reports failures into the
+// create-project form's error line, which isn't visible from a modal.
+async function browseInto(inputId) {
+  const input = document.getElementById(inputId);
+  const res = await fetch('/api/browse-folder', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({initial_dir: input.value}),
+  });
+  if (!res.ok) return;
+  const data = await res.json();
+  if (data.path) input.value = data.path;
+}
+
+function _showModal(id) {
+  document.getElementById(id).style.display = 'block';
+  document.getElementById('modal-backdrop').classList.add('open');
+}
+
+function closeModal() {
+  document.getElementById('modal-backdrop').classList.remove('open');
+}
+
+function _setStatus(id, cls, html) {
+  const el = document.getElementById(id);
+  el.className = `modal-status show ${cls}`;
+  el.innerHTML = html;
+}
+
+let exportSlug = null;
+
+function openExportModal(slug, name) {
+  exportSlug = slug;
+  document.getElementById('export-sub').textContent = name;
+  document.getElementById('export-status').className = 'modal-status';
+  _showModal('export-modal');
+}
+
+async function runExport() {
+  const dest = document.getElementById('export-dest').value.trim();
+  if (!dest) {
+    _setStatus('export-status', 'err', 'Choose a destination folder first.');
+    return;
+  }
+
+  const btn = document.getElementById('export-go');
+  btn.disabled = true;
+  btn.textContent = 'Exporting…';
+  _setStatus('export-status', '', 'Writing files…');
+
+  try {
+    const res = await fetch('/api/projects/export', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({slug: exportSlug, dest_dir: dest}),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      _setStatus('export-status', 'err', data.detail || 'Export failed.');
+      return;
+    }
+    const warns = (data.warnings || [])
+      .map(w => `<span class="warn">⚠ ${w}</span>`).join('');
+    _setStatus('export-status', 'ok',
+      `Exported ${data.trait_rows} trait entries from ${data.trinomials} trinomial(s) ` +
+      `plus ${data.codebook_files} codebook file(s), ${data.size_mb} MB.` +
+      `<span class="path">${data.export_dir}</span>${warns}`);
+  } catch (e) {
+    _setStatus('export-status', 'err', `Export failed: ${e}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Export';
+  }
+}
+
+document.getElementById('modal-backdrop').addEventListener('click', (e) => {
+  if (e.target.id === 'modal-backdrop') closeModal();
+});
+
+// Safe to bind unconditionally: the coding-UI shortcut handler below bails out
+// whenever the project screen is showing, which is the only time a modal exists.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.getElementById('modal-backdrop').classList.contains('open')) {
+    closeModal();
+  }
+});
 
 async function createProject() {
   const errEl = document.getElementById('create-error');

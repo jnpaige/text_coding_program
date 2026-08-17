@@ -12,8 +12,15 @@ Usage:
 
 import argparse
 import asyncio
+import csv
+import hashlib
+import ipaddress
 import json
+import os
+import platform
 import re
+import secrets
+import shutil
 import socket
 import sys
 from datetime import datetime, timezone
@@ -22,7 +29,13 @@ from pathlib import Path
 import pymupdf
 import yaml
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
@@ -30,7 +43,9 @@ import uvicorn
 # Globals
 # ---------------------------------------------------------------------------
 
-app = FastAPI()
+# No docs endpoints: this is a single-user local tool, and /docs + /openapi.json
+# only widen the surface that a stray local request can enumerate.
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
 if getattr(sys, 'frozen', False):
     _base_dir = Path(sys.executable).parent
@@ -39,8 +54,49 @@ else:
     _base_dir = Path(__file__).parent
     _internal_dir = _base_dir
 
-_projects_dir = _base_dir / "projects"
+
+def _resolve_projects_dir() -> Path:
+    """Where this install keeps its projects.
+
+    A packaged copy writes under %LOCALAPPDATA% rather than next to the .exe.
+    Two reasons, both about running on someone else's Windows machine: the
+    install folder is often not user-writable (Program Files, a read-only
+    network share, a managed-software drop), and keeping mutable coder data out
+    of the directory holding the executable and its DLLs means routine use
+    never needs write access to the code it is executing.
+
+    Overrides, in precedence order:
+      TEXT_CODING_DATA_DIR  — explicit path, wins over everything.
+      portable.txt          — a marker file next to the .exe, for running from
+                              a USB stick or shared drive with the projects
+                              travelling alongside the program.
+    """
+    env_dir = os.environ.get("TEXT_CODING_DATA_DIR", "").strip()
+    if env_dir:
+        return Path(env_dir).expanduser() / "projects"
+
+    if not getattr(sys, "frozen", False):
+        return _base_dir / "projects"
+
+    if (_base_dir / "portable.txt").is_file():
+        return _base_dir / "projects"
+
+    local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+    root = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
+    return root / "TextCodingProgram" / "projects"
+
+
+_projects_dir = _resolve_projects_dir()
 _static_dir = _internal_dir / "static"
+
+# Session auth — see _local_guard(). Set for real in main()/launch(); the
+# module-level default keeps a fresh token in place if the app object is
+# imported and served some other way.
+_session_token: str = secrets.token_urlsafe(32)
+_session_cookie = "tcp_session"
+_allowed_hosts: set[str] = set()
+_allowed_origins: set[str] = set()
+_loopback_only: bool = True
 
 _project: dict | None = None
 _traits: list[dict] = []
@@ -51,10 +107,105 @@ _page_dpi: int = 150
 
 
 # ---------------------------------------------------------------------------
+# Local-only access control
+# ---------------------------------------------------------------------------
+#
+# This process holds a browser-reachable window onto the coder's filesystem:
+# it renders site-form PDFs, writes coded output, and exposes a native
+# folder-picker dialog. Binding to 127.0.0.1 keeps it off the network, but
+# loopback is not a security boundary on its own — every other program running
+# as that user can reach it, and any web page the coder happens to open can
+# make their browser issue requests to it. Three checks close that gap:
+#
+#   1. Session token. Generated per run, handed to the browser once in the URL
+#      the launcher opens, then kept in an HttpOnly SameSite=Strict cookie.
+#      Another local process cannot read the cookie jar or guess the token, so
+#      it cannot drive this server. (Same pattern Jupyter uses.)
+#   2. Host header allow-list. Blocks DNS rebinding, where a remote page points
+#      a hostname it controls at 127.0.0.1 to get same-origin access.
+#   3. Origin check. Blocks cross-site requests outright rather than relying on
+#      the JSON content-type requirement to trip up a forged form POST.
+#
+# Known limitation: cookies are not port-scoped, so a *different* local server
+# on another port could be sent this cookie if the browser navigates to it.
+# That needs an attacker already running code as this user, which is outside
+# what a local single-user tool can defend against; the header path below
+# exists so automation can avoid cookies entirely.
+
+_TOKEN_HELP = """Text Coding Program — session token required
+
+Open the program using the link printed in its console window, which looks like:
+
+    http://127.0.0.1:8090/?token=...
+
+That link authorizes this browser for the current session. The token changes
+every time the program starts, so an old bookmark will not work — go back to
+the console window (or restart the program) to get the current link.
+"""
+
+
+def _is_loopback(addr: str) -> bool:
+    try:
+        return ipaddress.ip_address(addr).is_loopback
+    except ValueError:
+        return False
+
+
+def _set_session_context(host: str, port: int, loopback_only: bool) -> None:
+    """Record which Host/Origin values this run will accept."""
+    global _allowed_hosts, _allowed_origins, _loopback_only
+    _loopback_only = loopback_only
+    names = [host, "127.0.0.1", "localhost"] if _is_loopback(host) else [host]
+    _allowed_hosts = {f"{n}:{port}" for n in names}
+    _allowed_origins = {f"http://{n}:{port}" for n in names}
+
+
+def session_url(host: str, port: int) -> str:
+    return f"http://{host}:{port}/?token={_session_token}"
+
+
+@app.middleware("http")
+async def _local_guard(request, call_next):
+    client = request.client.host if request.client else ""
+    if _loopback_only and client and not _is_loopback(client):
+        return PlainTextResponse("Forbidden: non-local client\n", status_code=403)
+
+    if _allowed_hosts and request.headers.get("host", "") not in _allowed_hosts:
+        return PlainTextResponse("Forbidden: unexpected Host header\n", status_code=403)
+
+    origin = request.headers.get("origin")
+    if origin is not None and _allowed_origins and origin not in _allowed_origins:
+        return PlainTextResponse("Forbidden: cross-origin request\n", status_code=403)
+
+    # A valid token in the query string mints the cookie, then redirects to a
+    # clean URL so the token stops riding along in the address bar, in the
+    # browser's history, and in any Referer the page later sends.
+    query_token = request.query_params.get("token")
+    if query_token is not None and secrets.compare_digest(query_token, _session_token):
+        response = RedirectResponse(request.url.path or "/", status_code=303)
+        response.set_cookie(
+            _session_cookie, _session_token,
+            httponly=True, samesite="strict", path="/",
+        )
+        return response
+
+    supplied = request.cookies.get(_session_cookie) or request.headers.get("x-session-token", "")
+    if not secrets.compare_digest(supplied, _session_token):
+        return PlainTextResponse(_TOKEN_HELP, status_code=401)
+
+    return await call_next(request)
+
+
+# ---------------------------------------------------------------------------
 # Data loading helpers
 # ---------------------------------------------------------------------------
 
-def _load_traits(codebook_dir: Path) -> list[dict]:
+def _load_traits(codebook_dir: Path | None) -> list[dict]:
+    # A project whose codebook_dir has moved or been cleared leaves this empty,
+    # and Path("") globs the working directory rather than nothing — guard so
+    # the project opens with no traits instead of scooping up stray JSON.
+    if not codebook_dir or not codebook_dir.is_dir():
+        return []
     traits = []
     for p in sorted(codebook_dir.glob("*.json")):
         if p.name.startswith("_") or p.name.startswith("codebook_summary"):
@@ -66,7 +217,9 @@ def _load_traits(codebook_dir: Path) -> list[dict]:
     return traits
 
 
-def _discover_trinomials(pdf_dir: Path, pattern: str) -> list[str]:
+def _discover_trinomials(pdf_dir: Path | None, pattern: str) -> list[str]:
+    if not pdf_dir or not pdf_dir.is_dir():
+        return []
     rx = re.compile(pattern)
     tris = set()
     for d in sorted(pdf_dir.iterdir()):
@@ -134,6 +287,21 @@ def _coded_dir() -> Path:
     return d
 
 
+def _coded_path(tri: str) -> Path:
+    """Resolve a trinomial to its output file, refusing anything not in the
+    loaded project's own discovered set. The trinomial arrives as a URL path
+    segment and is interpolated into a filename, so accepting it on faith would
+    let a crafted request steer the write anywhere the user can write. Checking
+    membership rather than sanitizing the string keeps this closed by
+    construction — the only reachable names are ones the project discovered."""
+    if tri not in _pdf_cache:
+        raise HTTPException(404, f"Trinomial not found: {tri}")
+    path = (_coded_dir() / f"{tri}.coded.json").resolve()
+    if path.parent != _coded_dir().resolve():
+        raise HTTPException(400, f"Invalid trinomial: {tri}")
+    return path
+
+
 def _load_project_data(proj: dict) -> None:
     """Load traits, trinomials, segments, PDFs for the given project."""
     global _project, _traits, _trinomials, _segments, _pdf_cache, _page_dpi
@@ -142,8 +310,11 @@ def _load_project_data(proj: dict) -> None:
     pattern = proj.get("trinomial_pattern", r"(\d{2}[A-Z]{2}\d+)")
     _page_dpi = proj.get("page_dpi", 150)
 
-    pdf_dir = Path(proj["pdf_dir"])
-    codebook_dir = Path(proj["codebook_dir"])
+    # Empty is a real state, not a broken one — a project can outlive the
+    # directory it pointed at. Path("") is Path("."), which would silently scan
+    # the working directory, so keep it None instead.
+    pdf_dir = Path(proj["pdf_dir"]) if proj.get("pdf_dir") else None
+    codebook_dir = Path(proj["codebook_dir"]) if proj.get("codebook_dir") else None
 
     _traits = _load_traits(codebook_dir)
     _trinomials = _discover_trinomials(pdf_dir, pattern)
@@ -416,8 +587,7 @@ async def get_session():
 @app.get("/api/trinomial/{tri}")
 async def get_trinomial(tri: str):
     _require_project()
-    if tri not in _pdf_cache:
-        raise HTTPException(404, f"Trinomial not found: {tri}")
+    out_path = _coded_path(tri)
 
     seg_data = _segments.get(tri)
     segment_defs = seg_data.get("segments", []) if seg_data else []
@@ -428,7 +598,6 @@ async def get_trinomial(tri: str):
     doc.close()
 
     coded_traits: dict[str, dict] = {}
-    out_path = _coded_dir() / f"{tri}.coded.json"
     if out_path.exists():
         existing = json.loads(out_path.read_text(encoding="utf-8"))
         for i, seg in enumerate(existing.get("segments", [])):
@@ -473,7 +642,7 @@ async def get_trait(code_id: str):
 @app.post("/api/save/{tri}")
 async def save_result(tri: str, body: dict):
     _require_project()
-    out_path = _coded_dir() / f"{tri}.coded.json"
+    out_path = _coded_path(tri)
 
     existing = None
     if out_path.exists():
@@ -511,6 +680,296 @@ async def save_result(tri: str, body: dict):
     return {"status": "saved", "path": str(out_path)}
 
 
+# ---------------------------------------------------------------------------
+# API — Export a project
+# ---------------------------------------------------------------------------
+#
+# An export carries the coded results, the metadata needed to interpret them,
+# and nothing else. Two things are deliberately absent: the source PDFs and the
+# segment map. Site forms carry protected locational data and the OCR corpus
+# runs to gigabytes, so an export is meant to be a small artifact you can move
+# to another computer and read — not a second copy of the source material.
+#
+# The results appear in three forms, because they answer different needs:
+#
+#   coded_data.csv       flat, one row per coded trait — opens in Excel/R/pandas
+#                        and merges with site_coder output for IRR without any
+#                        preprocessing. This is the "look at the results" file.
+#   project_export.json  everything in one structured document, for scripts that
+#                        want the nesting the CSV flattens away.
+#   coded/               the per-trinomial .coded.json files, byte-for-byte, so
+#                        the export is never a lossy re-encoding of the originals.
+#
+# The codebook travels alongside them so a coded value stays interpretable
+# without the codebook repo on hand.
+
+_EXPORT_FORMAT = "text_coding_program_export"
+_EXPORT_FORMAT_VERSION = 2
+
+# Keep in sync with build.py's VERSION and pyproject.toml.
+PROGRAM_VERSION = "0.1.0"
+
+_CSV_COLUMNS = [
+    "trinomial", "segment_key", "segment_label", "segment_year",
+    "trait_key", "trait_title", "trait_value", "confidence",
+    "justification", "evidence_pages",
+    "coder_id", "project", "first_saved", "last_saved",
+]
+
+
+def _csv_scalar(value) -> str:
+    """Render one stored trait value as a single CSV cell.
+
+    trait_value is not one type: binary traits store a bool, numeric/free-text
+    traits a string, and multi-select list traits an array. Lists are joined
+    with '; ' rather than ',' so the cell stays readable in Excel instead of
+    looking like it should have been more columns.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (list, tuple)):
+        return "; ".join(_csv_scalar(v) for v in value)
+    return str(value)
+
+
+def _coded_files(proj: dict) -> list[Path]:
+    coded = Path(proj["project_dir"]) / "coded"
+    return sorted(coded.glob("*.coded.json")) if coded.is_dir() else []
+
+
+def _trait_titles(codebook_dir: Path) -> dict[str, str]:
+    """code_id -> human title, for a readable CSV. Empty when the codebook is
+    unreachable — a moved codebook should degrade the export, not fail it."""
+    if not codebook_dir or not codebook_dir.is_dir():
+        return {}
+    try:
+        return {t["code_id"]: t.get("title", "") for t in _load_traits(codebook_dir)}
+    except Exception:
+        return {}
+
+
+def _build_export_rows(proj: dict, titles: dict[str, str]) -> tuple[list[dict], list[dict]]:
+    """Return (csv_rows, coded_documents) for one project."""
+    rows: list[dict] = []
+    docs: list[dict] = []
+
+    for path in _coded_files(proj):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        docs.append(data)
+        tri = data.get("trinomial") or path.name.removesuffix(".coded.json")
+        for i, seg in enumerate(data.get("segments", [])):
+            for tr in seg.get("traits", []):
+                rows.append({
+                    "trinomial": tri,
+                    "segment_key": _segment_key(seg, i),
+                    "segment_label": seg.get("segment_label") or seg.get("label") or "",
+                    "segment_year": seg.get("segment_year") or seg.get("year") or "",
+                    "trait_key": tr.get("trait_key", ""),
+                    "trait_title": titles.get(tr.get("trait_key", ""), ""),
+                    "trait_value": _csv_scalar(tr.get("trait_value")),
+                    "confidence": _csv_scalar(tr.get("confidence")),
+                    "justification": tr.get("justification") or "",
+                    "evidence_pages": _csv_scalar(tr.get("evidence_pages")),
+                    "coder_id": data.get("coder_id", ""),
+                    "project": data.get("project", ""),
+                    "first_saved": data.get("first_saved", ""),
+                    "last_saved": data.get("last_saved", ""),
+                })
+
+    rows.sort(key=lambda r: (r["trinomial"], r["segment_key"], r["trait_key"]))
+    return rows, docs
+
+
+def _copy_glob(src: Path, dest: Path, patterns: tuple[str, ...]) -> int:
+    n = 0
+    for pattern in patterns:
+        for f in sorted(src.glob(pattern)):
+            if f.is_file():
+                dest.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, dest / f.name)
+                n += 1
+    return n
+
+
+def _dir_size(path: Path) -> int:
+    if not path.is_dir():
+        return 0
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+
+def _export_project(proj: dict, dest_root: Path) -> dict:
+    """Write the export folder. Returns a summary for the UI."""
+    # Seconds, plus a suffix if that still collides. Exporting the same project
+    # twice in quick succession is normal — once results-only to mail, once with
+    # PDFs to archive — so a name clash should never be the user's problem.
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out = dest_root / f"{proj['slug']}_export_{stamp}"
+    n = 2
+    while out.exists():
+        out = dest_root / f"{proj['slug']}_export_{stamp}_{n}"
+        n += 1
+    out.mkdir(parents=True)
+
+    warnings: list[str] = []
+    codebook_dir = Path(proj["codebook_dir"]) if proj.get("codebook_dir") else None
+    titles = _trait_titles(codebook_dir) if codebook_dir else {}
+    rows, docs = _build_export_rows(proj, titles)
+
+    # --- results, in all three shapes ---
+    with (out / "coded_data.csv").open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=_CSV_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    coded_src = Path(proj["project_dir"]) / "coded"
+    if coded_src.is_dir():
+        _copy_glob(coded_src, out / "coded", ("*.coded.json",))
+
+    # --- the codebook, so a coded value stays interpretable on its own ---
+    codebook_files = 0
+    if codebook_dir and codebook_dir.is_dir():
+        codebook_files = _copy_glob(codebook_dir, out / "codebook", ("*.json",))
+    else:
+        warnings.append(
+            f"Codebook directory not found, so no definitions were included: "
+            f"{proj.get('codebook_dir')}. The coded results are complete, but "
+            "trait_title is blank in the CSV."
+        )
+
+    # --- metadata ---
+    # Source paths are recorded as provenance, under the export block rather
+    # than at the top level: they describe where this project's inputs lived on
+    # the machine that made the export, and nothing here resolves them.
+    export_proj = {k: v for k, v in proj.items()
+                   if k not in ("project_dir", "pdf_dir", "codebook_dir", "segments_dir")}
+    export_proj["export"] = {
+        "format": _EXPORT_FORMAT,
+        "format_version": _EXPORT_FORMAT_VERSION,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "exported_from": {
+            "machine": platform.node(),
+            "user": os.environ.get("USERNAME") or os.environ.get("USER") or "",
+            "program_version": PROGRAM_VERSION,
+        },
+        "source_paths": {
+            "pdf_dir": proj.get("pdf_dir", ""),
+            "codebook_dir": proj.get("codebook_dir", ""),
+            "segments_dir": (proj.get("segments_dir") or "").strip(),
+        },
+        "contents": {
+            "coded_results": True,
+            "codebook_files": codebook_files,
+            "pdfs": False,
+            "segments": False,
+        },
+    }
+    (out / "project.json").write_text(
+        json.dumps(export_proj, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    (out / "project_export.json").write_text(json.dumps({
+        "project": export_proj,
+        "coded": docs,
+        "coded_rows": rows,
+    }, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    summary = {
+        "export_dir": str(out),
+        "trinomials": len(docs),
+        "trait_rows": len(rows),
+        "codebook_files": codebook_files,
+        "size_mb": round(_dir_size(out) / (1024 * 1024), 1),
+        "warnings": warnings,
+    }
+
+    manifest = dict(summary)
+    manifest["contents"] = export_proj["export"]["contents"]
+    manifest["sha256"] = {
+        name: hashlib.sha256((out / name).read_bytes()).hexdigest()
+        for name in ("coded_data.csv", "project_export.json")
+    }
+    (out / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    _write_export_readme(out, export_proj, summary)
+    return summary
+
+
+def _write_export_readme(out: Path, proj: dict, summary: dict) -> None:
+    warn_block = ""
+    if summary["warnings"]:
+        warn_block = "\nWARNINGS FROM THIS EXPORT\n" + "-" * 25 + "\n" + \
+            "\n".join(f"* {w}" for w in summary["warnings"]) + "\n"
+
+    codebook_line = (
+        f"Codebook definitions, {summary['codebook_files']} trait file(s)."
+        if summary["codebook_files"] else "NOT INCLUDED — see warnings above."
+    )
+
+    (out / "README.txt").write_text(f"""Text Coding Program — exported results
+======================================
+
+Project : {proj.get('name', '')}
+Coder   : {proj.get('coder_id', '')}
+Exported: {proj['export']['exported_at']} from {proj['export']['exported_from']['machine']}
+
+Contents: {summary['trinomials']} coded trinomial(s), {summary['trait_rows']} trait entries, {summary['size_mb']} MB.
+{warn_block}
+START HERE
+----------
+Open coded_data.csv. Nothing else is needed and the program does not have to be
+installed anywhere.
+
+WHAT IS IN HERE
+---------------
+coded_data.csv       One row per coded trait — the file to open in Excel, R, or
+                     pandas. Written UTF-8 with a BOM so Excel gets the encoding
+                     right on a double-click. trinomial + segment_key +
+                     trait_key identify a row, which is the shape an inter-rater
+                     comparison against site_coder output needs. Multi-select
+                     values and evidence_pages are joined with '; ' inside one
+                     cell. Page numbers are exactly as the viewer recorded them,
+                     not renumbered.
+project_export.json  The same data structured rather than flattened, plus the
+                     project metadata, in one document.
+coded/               The original per-trinomial .coded.json files, unmodified.
+codebook/            {codebook_line}
+project.json         Project metadata: name, coder, and where the source files
+                     lived on the machine that made this export.
+manifest.json        Counts, contents, and SHA-256 of the CSV and JSON.
+
+WHAT IS NOT IN HERE
+-------------------
+No source PDFs and no segment map, by design. This folder holds coded results
+and the definitions needed to read them — it is not a copy of the site forms,
+and it cannot be used to reopen the project for further coding.
+
+Because of that, the evidence_pages numbers refer to pages of documents that
+are not in this folder. They are here so a coded value can be traced back on a
+machine that does have the source corpus.
+""", encoding="utf-8")
+
+
+@app.post("/api/projects/export")
+async def export_project_endpoint(body: dict):
+    slug = (body.get("slug") or "").strip()
+    proj_path = _projects_dir / slug / "project.json"
+    if not slug or not proj_path.is_file():
+        raise HTTPException(404, f"Project not found: {slug}")
+
+    dest_raw = (body.get("dest_dir") or "").strip()
+    if not dest_raw:
+        raise HTTPException(400, "Choose a destination folder for the export")
+    dest_root = Path(dest_raw)
+    if not dest_root.is_dir():
+        raise HTTPException(400, f"Destination folder not found: {dest_root}")
+
+    proj = json.loads(proj_path.read_text(encoding="utf-8"))
+    proj["project_dir"] = str(_projects_dir / slug)
+    return _export_project(proj, dest_root)
+
+
 app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
 
@@ -536,15 +995,32 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8090)
+    ap.add_argument(
+        "--allow-non-loopback", action="store_true",
+        help="Permit binding to a non-loopback address. Off by default: this "
+             "server renders site PDFs and exposes a filesystem folder picker, "
+             "so reaching it from the network means anyone who can route to "
+             "this machine can read the documents being coded.",
+    )
     args = ap.parse_args()
 
-    _projects_dir.mkdir(exist_ok=True)
-
     host = args.host
+    if not _is_loopback(host) and not args.allow_non_loopback:
+        sys.exit(
+            f"Refusing to bind {host}: that exposes the PDFs being coded and "
+            "the folder-picker endpoint beyond this machine.\n"
+            "Use --host 127.0.0.1, or pass --allow-non-loopback if you have a "
+            "reason to serve it on the network."
+        )
+
+    _projects_dir.mkdir(parents=True, exist_ok=True)
+
     port = _find_open_port(host, args.port)
+    _set_session_context(host, port, loopback_only=not args.allow_non_loopback)
 
     print(f"Projects   : {_projects_dir}")
-    print(f"Server     : http://{host}:{port}")
+    print(f"Open this  : {session_url(host, port)}")
+    print("             (the token authorizes your browser; it changes each run)")
 
     uvicorn.run(app, host=host, port=port)
 

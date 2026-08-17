@@ -1,8 +1,144 @@
+# This repo has a public remote, and the pipeline it belongs to handles site
+# forms whose locational data is legally restricted. So the policy is
+# deny-by-default for anything data-shaped: code, config, and docs are tracked,
+# research material never is. Committing data should take a deliberate act
+# rather than remembering to add a rule.
+#
+# Need to commit something matched below? `git add -f <path>` — after checking
+# that it really carries no site data.
+#
+# Note: .gitignore only governs *untracked* files. If something sensitive is
+# already tracked, `git rm --cached <path>` first, and rewrite history if it has
+# been pushed.
+
+# --- Environment, caches, build artifacts ----------------------------------
 .venv/
+venv/
+env/
 __pycache__/
-*.pyc
-runs/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
 dist/
 build/
 *.spec
+
+# --- Coded output, live projects, exports ----------------------------------
+# projects/ is where a source checkout keeps real coding sessions, and every
+# export folder is by definition a bundle of results.
+runs/
+projects/
+*_export_*/
+*.coded.json
+
+# --- Documents and scans ---------------------------------------------------
+*.pdf
+*.doc
+*.docx
+*.rtf
+*.odt
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tif
+*.tiff
+
+# --- Tabular and statistical data ------------------------------------------
+*.csv
+*.tsv
+*.xls
+*.xlsx
+*.xlsm
+*.ods
+*.parquet
+*.feather
+*.dta
+*.sav
+*.rds
+*.RData
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Structured pipeline data ----------------------------------------------
+# Every JSON in this pipeline is data, not config: codebook traits, segment
+# maps, coded results, project definitions, segmenter run metadata. Nothing this
+# program needs in order to run is a .json file.
+*.json
+*.jsonl
+*.ndjson
+
+# --- Extracted text and logs -----------------------------------------------
+# pdf_ocr writes page text as .txt next to the PDFs; logs quote paths and
+# document contents.
+*.txt
+*.log
+
+# --- Geospatial ------------------------------------------------------------
+# Site coordinates are the most restricted material in the corpus.
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.sbn
+*.sbx
+*.qpj
+*.kml
+*.kmz
+*.gpkg
+*.geojson
+*.gml
+*.gdb/
+
+# --- Archives (an export, zipped, is still an export) ----------------------
+*.zip
+*.7z
+*.rar
+*.tar
+*.gz
+*.tgz
+*.bz2
+
+# --- Secrets ---------------------------------------------------------------
+.env
+.env.*
+*.key
+*.pem
+*.pfx
+*.p12
+credentials*
+secrets*
+
+# --- Editor, R, and OS cruft -----------------------------------------------
+.Rhistory
+.Rproj.user/
+.Rproj
+.idea/
+.vscode/
+*.swp
+*~
+~$*
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local session instructions. Already tracked, so this rule does nothing until
+# `git rm --cached CLAUDE.md`.
 CLAUDE.md
+
+# --- Always keep: what this program needs to run ---------------------------
+# Explicit, so no broad rule above can ever quietly drop one of them.
+!.gitignore
+!README.md
+!pyproject.toml
+!uv.lock
+!config.yaml
+!config_test.yaml
+!server.py
+!build.py
+!static/index.html

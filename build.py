@@ -4,16 +4,39 @@ build.py — Launcher entry point and PyInstaller build script.
 
 Two modes:
   1. As the packaged entry point (what the .exe runs):
-       Starts the FastAPI server and opens the browser automatically.
+       Starts the FastAPI server on loopback and opens the browser on the
+       session URL, so the coder never has to read the token off the console.
 
   2. As the build script (run from the dev environment):
        uv run python build.py --build
        Invokes PyInstaller to produce dist/text_coding_program/
 
 The dist/ folder is self-contained — zip it and distribute.
+
+Why the build is shaped the way it is
+-------------------------------------
+Windows has no certification to pass and no review to submit to; what decides
+whether a coder's machine lets the program run is Defender's heuristics plus
+SmartScreen's reputation on the exact bytes shipped. Three build choices carry
+most of that weight:
+
+  * onedir, not onefile. A --onefile exe unpacks a compressed payload into temp
+    and executes it, which is what actual packed malware looks like from the
+    outside. Bundling as a directory keeps the loader boring.
+  * UPX off. Compressing the binaries is the single most reliable way to get a
+    PyInstaller build flagged, and it buys nothing here — the program ships as
+    a zip anyway, which already compresses.
+  * A real version resource. An unsigned exe with no company, product, or
+    version metadata scores worse on the heuristics than the same exe with it,
+    and it is what tells a coder inspecting Properties that the file is yours.
+
+Signing is the only thing that produces durable, transferable reputation, and
+it is optional — see --sign below and the README's distribution section.
 """
 
-import os
+import hashlib
+import importlib.util
+import shutil
 import socket
 import subprocess
 import sys
@@ -22,6 +45,16 @@ import time
 import webbrowser
 from pathlib import Path
 
+APP_NAME = "text_coding_program"
+DISPLAY_NAME = "Text Coding Program"
+COMPANY = "Jonathan Paige"
+DESCRIPTION = "Interactive text coding of archaeological documents against a structured codebook"
+VERSION = (0, 1, 0, 0)
+
+
+# ---------------------------------------------------------------------------
+# Launcher (packaged entry point)
+# ---------------------------------------------------------------------------
 
 def find_open_port(host: str = "127.0.0.1", preferred: int = 8090) -> int:
     for offset in range(20):
@@ -37,17 +70,15 @@ def find_open_port(host: str = "127.0.0.1", preferred: int = 8090) -> int:
 
 def launch():
     """Start the server and open the browser. This is what the .exe runs."""
-    # Ensure projects/ dir exists next to the executable (or script)
-    if getattr(sys, 'frozen', False):
-        base = Path(sys.executable).parent
-    else:
-        base = Path(__file__).parent
+    import uvicorn
+    from server import app, _projects_dir, _set_session_context, session_url
 
-    os.chdir(str(base))
+    _projects_dir.mkdir(parents=True, exist_ok=True)
 
     host = "127.0.0.1"
     port = find_open_port(host)
-    url = f"http://{host}:{port}"
+    _set_session_context(host, port, loopback_only=True)
+    url = session_url(host, port)
 
     def open_browser():
         time.sleep(1.5)
@@ -55,75 +86,376 @@ def launch():
 
     threading.Thread(target=open_browser, daemon=True).start()
 
-    print(f"Starting Text Coding Program at {url}")
+    print(f"{DISPLAY_NAME}")
+    print(f"Projects : {_projects_dir}")
+    print(f"Address  : {url}")
+    print()
+    print("Your browser should open automatically. If it does not, copy the")
+    print("address above — the token in it authorizes your browser for this")
+    print("session, and a new one is generated every time you start up.")
+    print()
     print("Close this window to stop the server.\n")
 
-    import uvicorn
-    from server import app, _projects_dir
-    _projects_dir.mkdir(exist_ok=True)
-
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
-def build():
-    """Invoke PyInstaller to create the distributable bundle."""
-    spec_file = Path(__file__).parent / "text_coding_program.spec"
+# ---------------------------------------------------------------------------
+# Build
+# ---------------------------------------------------------------------------
 
-    if not spec_file.exists():
-        # Generate the spec file
-        cmd = [
-            sys.executable, "-m", "PyInstaller",
-            "--name", "text_coding_program",
-            "--noconfirm",
-            "--console",
-            "--add-data", f"static{os.pathsep}static",
-            "--add-data", f"server.py{os.pathsep}.",
-            "--hidden-import", "uvicorn.logging",
-            "--hidden-import", "uvicorn.loops",
-            "--hidden-import", "uvicorn.loops.auto",
-            "--hidden-import", "uvicorn.protocols",
-            "--hidden-import", "uvicorn.protocols.http",
-            "--hidden-import", "uvicorn.protocols.http.auto",
-            "--hidden-import", "uvicorn.protocols.websockets",
-            "--hidden-import", "uvicorn.protocols.websockets.auto",
-            "--hidden-import", "uvicorn.lifespan",
-            "--hidden-import", "uvicorn.lifespan.on",
-            "--hidden-import", "tkinter",
-            "--hidden-import", "tkinter.filedialog",
-            "--collect-submodules", "pymupdf",
-            "build.py",
-        ]
-        print("Running PyInstaller...")
-        subprocess.run(cmd, check=True)
+def _version_file(build_dir: Path) -> Path:
+    """Write the Windows version resource PyInstaller stamps into the exe."""
+    vers = ", ".join(str(n) for n in VERSION)
+    dotted = ".".join(str(n) for n in VERSION)
+    content = f"""# Generated by build.py — do not edit.
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=({vers}),
+    prodvers=({vers}),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0),
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable('040904B0', [
+        StringStruct('CompanyName', {COMPANY!r}),
+        StringStruct('FileDescription', {DESCRIPTION!r}),
+        StringStruct('FileVersion', {dotted!r}),
+        StringStruct('InternalName', {APP_NAME!r}),
+        StringStruct('LegalCopyright', {COMPANY!r}),
+        StringStruct('OriginalFilename', {APP_NAME + '.exe'!r}),
+        StringStruct('ProductName', {DISPLAY_NAME!r}),
+        StringStruct('ProductVersion', {dotted!r}),
+      ]),
+    ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])]),
+  ],
+)
+"""
+    build_dir.mkdir(parents=True, exist_ok=True)
+    path = build_dir / "version_info.txt"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+HIDDEN_IMPORTS = [
+    "uvicorn.logging",
+    "uvicorn.loops", "uvicorn.loops.auto",
+    "uvicorn.protocols",
+    "uvicorn.protocols.http", "uvicorn.protocols.http.auto",
+    "uvicorn.protocols.websockets", "uvicorn.protocols.websockets.auto",
+    "uvicorn.lifespan", "uvicorn.lifespan.on",
+    "tkinter", "tkinter.filedialog",
+]
+
+
+def _write_spec(spec_path: Path, version_path: Path) -> None:
+    """Regenerate the spec from this script every build.
+
+    The spec is a build artifact, not a source file (it is gitignored). Writing
+    it fresh each time means the hardening choices below cannot drift out of
+    sync with this script, and a clean clone builds identically to this one
+    instead of inheriting whatever a stale spec happened to say.
+    """
+    spec = f"""# -*- mode: python ; coding: utf-8 -*-
+# Generated by build.py — do not edit; your changes will be overwritten.
+from PyInstaller.utils.hooks import collect_submodules
+
+hiddenimports = {HIDDEN_IMPORTS!r}
+hiddenimports += collect_submodules('pymupdf')
+
+a = Analysis(
+    ['build.py'],
+    pathex=[],
+    binaries=[],
+    datas=[('static', 'static'), ('server.py', '.')],
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={{}},
+    runtime_hooks=[],
+    excludes=['matplotlib', 'numpy', 'pandas', 'PIL', 'pytest', 'setuptools'],
+    noarchive=False,
+    optimize=0,
+)
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name={APP_NAME!r},
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    # UPX off, deliberately — packed PyInstaller binaries are a well-known
+    # antivirus heuristic trigger, and the zip we distribute already compresses.
+    upx=False,
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    version={str(version_path)!r},
+    # Run with the invoking user's rights. No elevation prompt, and nothing in
+    # the program needs to write outside the user's own profile.
+    uac_admin=False,
+    uac_uiaccess=False,
+)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name={APP_NAME!r},
+)
+"""
+    spec_path.write_text(spec, encoding="utf-8")
+
+
+def _pyinstaller_cmd() -> list[str]:
+    """argv prefix that runs PyInstaller.
+
+    Prefers the current interpreter, but falls back to `uv run --extra build`
+    when PyInstaller isn't importable there. The fallback exists because uv
+    resyncs the environment to the project's *default* dependency set on every
+    `uv run`: once you have done `uv sync --extra build`, any later plain
+    `uv run python ...` prunes PyInstaller straight back out of .venv. Without
+    this, whether `build.py --build` works depends on which uv command happened
+    to run last, which is a miserable thing to debug.
+    """
+    if importlib.util.find_spec("PyInstaller") is not None:
+        return [sys.executable, "-m", "PyInstaller"]
+
+    uv = shutil.which("uv")
+    if uv:
+        print("PyInstaller not present in this environment — invoking it via uv"
+              " with the 'build' extra.")
+        return [uv, "run", "--extra", "build", "python", "-m", "PyInstaller"]
+
+    sys.exit(
+        "PyInstaller is not installed and uv was not found on PATH.\n"
+        "  uv sync --extra build\n"
+        "then rerun this script."
+    )
+
+
+def _require_unlocked(dist_dir: Path) -> None:
+    """Fail early and legibly if a previous build is still running.
+
+    A running text_coding_program.exe keeps its own image and DLLs open, so
+    PyInstaller cannot clear dist/ and dies with a bare `PermissionError ...
+    Access is denied` several frames deep in shutil. Checking first turns that
+    into an instruction.
+    """
+    exe = dist_dir / f"{APP_NAME}.exe"
+    if not exe.exists():
+        return
+    try:
+        with exe.open("r+b"):
+            return
+    except PermissionError:
+        sys.exit(
+            f"{exe} is locked — a copy of the program is still running, and\n"
+            "PyInstaller cannot replace dist/ while it is.\n\n"
+            "Close the program's console window, or:\n"
+            "  Get-Process text_coding_program | Stop-Process\n\n"
+            "then rerun this script."
+        )
+
+
+def _find_signtool() -> Path | None:
+    """Locate signtool.exe from an installed Windows SDK."""
+    on_path = subprocess.run(["where", "signtool"], capture_output=True, text=True)
+    if on_path.returncode == 0:
+        first = on_path.stdout.strip().splitlines()[0].strip()
+        if first:
+            return Path(first)
+
+    for root in (r"C:\Program Files (x86)\Windows Kits\10\bin",
+                 r"C:\Program Files\Windows Kits\10\bin"):
+        base = Path(root)
+        if not base.is_dir():
+            continue
+        candidates = sorted(base.glob("*/x64/signtool.exe"), reverse=True)
+        if candidates:
+            return candidates[0]
+    return None
+
+
+def _sign(exe: Path, thumbprint: str | None, dlib: str | None, metadata: str | None) -> bool:
+    """Authenticode-sign the exe. Returns True on success.
+
+    Always timestamps: an Authenticode signature without an RFC 3161 timestamp
+    stops validating the day the certificate expires, which for a tool coders
+    keep using across a multi-year study is the difference between a signature
+    that lasts and one that quietly becomes worthless.
+    """
+    signtool = _find_signtool()
+    if signtool is None:
+        print("  signtool.exe not found — install the Windows SDK to sign.")
+        return False
+
+    cmd = [str(signtool), "sign", "/fd", "SHA256",
+           "/tr", "http://timestamp.digicert.com", "/td", "SHA256"]
+    if dlib:
+        # Azure Artifact Signing (formerly Trusted Signing): the certificate
+        # lives in Azure and is fetched per-signature, so there is no local
+        # cert store or hardware token involved.
+        cmd += ["/dlib", dlib, "/dmdf", metadata or ""]
+    elif thumbprint:
+        cmd += ["/sha1", thumbprint]
     else:
-        cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", str(spec_file)]
-        print(f"Building from {spec_file}...")
-        subprocess.run(cmd, check=True)
+        cmd += ["/a"]  # best available cert in the user's store
+    cmd.append(str(exe))
 
-    dist_dir = Path("dist/text_coding_program")
-    # Ensure projects/ dir exists in the dist
-    (dist_dir / "projects").mkdir(exist_ok=True)
+    print(f"  {' '.join(cmd)}")
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        print("  Signing failed. The build is still usable, just unsigned.")
+        return False
 
-    shortcut_path = _create_shortcut(dist_dir)
+    subprocess.run([str(signtool), "verify", "/pa", "/v", str(exe)])
+    return True
+
+
+def build(argv: list[str]) -> None:
+    """Invoke PyInstaller to create the distributable bundle."""
+    root = Path(__file__).parent
+    dist_dir = root / "dist" / APP_NAME
+    _require_unlocked(dist_dir)
+
+    spec_path = root / f"{APP_NAME}.spec"
+    version_path = _version_file(root / "build")
+    _write_spec(spec_path, version_path)
+
+    print(f"Building from {spec_path} (onedir, no UPX, version-stamped)...")
+    subprocess.run(
+        _pyinstaller_cmd() + ["--noconfirm", "--clean", str(spec_path)],
+        check=True,
+    )
+
+    exe = dist_dir / f"{APP_NAME}.exe"
+
+    signed = False
+    if "--sign" in argv:
+        print("\nSigning...")
+        signed = _sign(
+            exe,
+            thumbprint=_opt(argv, "--cert-thumbprint"),
+            dlib=_opt(argv, "--sign-dlib"),
+            metadata=_opt(argv, "--sign-metadata"),
+        )
+
+    digest = hashlib.sha256(exe.read_bytes()).hexdigest()
+    _write_dist_readme(dist_dir, signed, digest)
 
     print(f"\nBuild complete: {dist_dir}")
-    print(f"To distribute: zip the '{dist_dir}' folder and share it.")
-    print(f"Users double-click text_coding_program.exe to start.")
+    print(f"  signed      : {'yes' if signed else 'no'}")
+    print(f"  exe SHA-256 : {digest}")
+    print(f"\nTo distribute: zip '{dist_dir}' and share it, along with the")
+    print("SHA-256 above so recipients can confirm they got your build.")
+    if not signed:
+        print("\nUnsigned: coders will see a SmartScreen 'unrecognized app'")
+        print("prompt on first run. READ_ME_FIRST.txt in the dist folder tells")
+        print("them what to expect; see the README for the signing options.")
 
+    shortcut_path = _create_shortcut(dist_dir)
     if shortcut_path:
         _notify_shortcut(shortcut_path)
 
 
+def _opt(argv: list[str], flag: str) -> str | None:
+    """Value following `flag`, or None."""
+    if flag in argv:
+        i = argv.index(flag)
+        if i + 1 < len(argv):
+            return argv[i + 1]
+    return None
+
+
+def _write_dist_readme(dist_dir: Path, signed: bool, digest: str) -> None:
+    """Ship a plain-text note for the coders who receive the zip.
+
+    An unsigned tool from a colleague will trip a SmartScreen prompt, and a
+    coder who was told nothing about it has to decide on the spot whether to
+    trust it. Saying so up front — with a checksum they can verify — is what
+    makes clicking through an informed choice rather than a habit.
+    """
+    warning = "" if signed else """
+FIRST RUN: A WINDOWS WARNING IS EXPECTED
+----------------------------------------
+This program is not code-signed, so Windows shows:
+
+    "Windows protected your PC — Microsoft Defender SmartScreen
+     prevented an unrecognized app from starting."
+
+That message means Windows has not seen this file before. It is not a virus
+report. To continue: click "More info", then "Run anyway".
+
+Before you do, you can confirm the file is the one that was sent to you.
+Open PowerShell in this folder and run:
+
+    Get-FileHash text_coding_program.exe -Algorithm SHA256
+
+It should print:
+
+    {digest}
+
+If it prints anything else, stop and contact whoever sent you this folder.
+""".replace("{digest}", digest)
+
+    content = f"""{DISPLAY_NAME}
+{'=' * len(DISPLAY_NAME)}
+
+{DESCRIPTION}
+{warning}
+HOW TO START
+------------
+Double-click text_coding_program.exe (or the "{DISPLAY_NAME}" shortcut).
+
+A console window opens and your browser opens to the coding interface. Leave
+the console window open while you work — closing it stops the program.
+
+The address includes a one-time token that authorizes your browser. It is
+different every time you start the program, so do not bookmark it; start from
+the .exe each session.
+
+WHAT IT DOES ON YOUR MACHINE
+----------------------------
+* Serves a web page to 127.0.0.1 (your machine only). Nothing is exposed to
+  the network, and the program makes no internet connections of any kind.
+* Reads the PDFs and codebook files in the folders you point a project at.
+* Writes your coded output to:
+      %LOCALAPPDATA%\\TextCodingProgram\\projects
+  Put an empty file named portable.txt next to the .exe to keep projects in
+  this folder instead (useful on a USB stick or shared drive).
+* Needs no administrator rights. If something prompts you to elevate, that is
+  not this program.
+
+exe SHA-256: {digest}
+Signed     : {'yes' if signed else 'no'}
+"""
+    (dist_dir / "READ_ME_FIRST.txt").write_text(content, encoding="utf-8")
+
+
 def _create_shortcut(dist_dir: Path) -> Path | None:
     """Create a .lnk shortcut next to the dist folder. Returns the shortcut path, or None on failure."""
-    exe = (dist_dir / "text_coding_program.exe").resolve()
-    shortcut = (dist_dir.parent / "Text Coding Program.lnk").resolve()
+    exe = (dist_dir / f"{APP_NAME}.exe").resolve()
+    shortcut = (dist_dir.parent / f"{DISPLAY_NAME}.lnk").resolve()
     ps = (
         f'$ws = New-Object -ComObject WScript.Shell; '
         f'$s = $ws.CreateShortcut("{shortcut}"); '
         f'$s.TargetPath = "{exe}"; '
         f'$s.WorkingDirectory = "{exe.parent}"; '
-        f'$s.Description = "Text Coding Program"; '
+        f'$s.Description = "{DISPLAY_NAME}"; '
         f'$s.Save()'
     )
     result = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True)
@@ -143,11 +475,11 @@ def _notify_shortcut(shortcut_path: Path) -> None:
         f"Copy or drag it wherever you'd like to launch the program\n"
         f"(Desktop, taskbar, Start menu, etc.)."
     )
-    ctypes.windll.user32.MessageBoxW(0, msg, "Text Coding Program — Build Complete", 0x40)
+    ctypes.windll.user32.MessageBoxW(0, msg, f"{DISPLAY_NAME} — Build Complete", 0x40)
 
 
 if __name__ == "__main__":
     if "--build" in sys.argv:
-        build()
+        build(sys.argv[1:])
     else:
         launch()

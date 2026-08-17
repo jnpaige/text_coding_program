@@ -97,7 +97,18 @@ uv run python server.py --config config_test.yaml --coder jpaige
 
 ### 3. Open browser
 
-Navigate to the URL printed in the terminal (default `http://127.0.0.1:8090`).
+Navigate to the URL printed in the terminal. It carries a session token:
+
+```
+http://127.0.0.1:8090/?token=<random>
+```
+
+The token is generated fresh on every start and authorizes your browser for
+that run — visiting `http://127.0.0.1:8090` without it returns 401 with
+instructions. Don't bookmark the tokenized URL; start from the terminal (or the
+exe) each session. See "Local access control" below for why it's there.
+
+The packaged exe opens this URL for you, so coders never have to copy a token.
 
 ## Output
 
@@ -172,41 +183,95 @@ Verified directly against `site_coder`'s source (`coder.py`, `batch_coder.py`, `
 | **Output schema** | `{trinomial, segments: [{segment_label, segment_year, traits: [...]}]}` | `{trinomial, segments: [{label, year, codes: {...}}]}` — same `segments` array, different trait representation |
 | **Coding unit** | one segment (from segment map) | one segment (from segment map) |
 
-The trait representations differ (list-of-objects-with-justification/confidence vs. flat value dict) — that gap predates today's changes and isn't new. An IRR comparison pipeline (Cohen's kappa, Krippendorff's alpha) needs to normalize both into a common shape; site_coder does this per-run via `build_coded_csv`. No equivalent flattening script exists yet on the text_coding_program side.
+The trait representations differ (list-of-objects-with-justification/confidence vs. flat value dict) — that gap predates today's changes and isn't new. An IRR comparison pipeline (Cohen's kappa, Krippendorff's alpha) needs to normalize both into a common shape; site_coder does this per-run via `build_coded_csv`. On this side, **project export** now writes the equivalent flat table (`coded_data.csv`, keyed on `trinomial` + `segment_key` + `trait_key`) — see below.
+
+## Exporting results
+
+"Export…" on any project card in the picker writes a folder you can copy to
+another computer and read:
+
+```
+<project>_export_<timestamp>/
+  coded_data.csv       one row per coded trait — the file to open in Excel/R/pandas
+  project_export.json  the same data structured rather than flattened
+  coded/               the original per-trinomial .coded.json files, unmodified
+  codebook/            per-trait JSON, so trait definitions travel with the results
+  project.json         project metadata and the source paths this export came from
+  manifest.json        counts, contents, SHA-256 of the CSV and JSON
+  README.txt           what the folder is, written for whoever receives it
+```
+
+Nothing needs to be installed on the receiving machine — open `coded_data.csv`.
+
+
 
 ## Distributing to a team
 
 The program can be packaged as a standalone `.exe` bundle that requires no Python, uv, or terminal knowledge. Users double-click the exe and a browser opens.
 
-**Strategy: build once per machine that needs it, don't hand-copy a bundle built somewhere else.** The bundle *can* be relocated after building (see "Is the dist folder portable?" below), but rebuilding locally is the path that's actually been exercised — every machine that's set this up so far (Cabanerso, Monfrague) ran `build.py --build` itself rather than receiving a copied `dist/` folder from another machine. Prefer that unless there's a specific reason to hand off a pre-built bundle instead.
 
 ### Building the bundle
 
 ```powershell
-# Install the build dependency (one time)
-uv sync --extra build
-
-# Build the distributable folder
-uv run python build.py --build
+uv run --extra build python build.py --build
 ```
 
-This produces `dist/text_coding_program/` (~70 MB) containing the exe, Python runtime, and all dependencies, plus a `Text Coding Program.lnk` shortcut next to it in `dist/`. The build script pops up a message box telling you where the shortcut landed so you can move it (Desktop, taskbar, Start menu, etc.) — no manual shortcut-creation step needed.
+Pass `--extra build` on the build command itself rather than relying on an
+earlier `uv sync --extra build`. `uv run` resyncs the environment to the
+project's *default* dependency set every time it runs, so a plain
+`uv run python server.py` in between prunes PyInstaller back out of `.venv` and
+the next build dies with `No module named PyInstaller`. `build.py` recovers from
+this on its own — it re-invokes PyInstaller through `uv run --extra build` when
+it isn't importable — but passing the extra up front skips the round trip.
 
-### Is the dist folder portable?
+This produces `dist/text_coding_program/` (~80 MB) containing the exe, Python runtime, and all dependencies, plus a `Text Coding Program.lnk` shortcut next to it in `dist/`. The build script pops up a message box telling you where the shortcut landed so you can move it (Desktop, taskbar, Start menu, etc.) — no manual shortcut-creation step needed.
 
-**Yes, the `dist/text_coding_program/` folder itself** — copy or move it to any location, on this machine or another, and `text_coding_program.exe` still works. It locates `static/`, `projects/`, etc. relative to its own current location at runtime (`Path(sys.executable).parent` in `build.py`'s `launch()`), not a path baked in at build time. Zip it, unzip it elsewhere, done — matches the existing "self-contained, zip it and distribute" note above.
+It also writes `READ_ME_FIRST.txt` into the bundle and prints the exe's SHA-256.
+Both exist for the same reason: an unsigned tool from a colleague trips a
+SmartScreen prompt, and a coder who was warned in advance — and given a hash
+they can check — is making an informed decision rather than a reflexive one.
 
-- Moving just the shortcut (e.g., dragging it to the Desktop) is fine — it still points back at the same `dist/text_coding_program/` folder, wherever that is.
-- Moving or renaming the `dist/text_coding_program/` folder *after* the shortcut was created breaks it — the shortcut keeps pointing at the old path. Rebuild (regenerates both the folder and a shortcut matching its new location) rather than trying to hand-fix the `.lnk`.
+The build is deliberately shaped to stay off Defender's heuristics; `build.py`'s
+module docstring explains each choice (onedir rather than onefile, UPX off, a
+real version resource). If you change the packaging, keep those three.
 
 ### For end users
 
 1. Unzip `text_coding_program.zip` to any location
-2. Double-click `text_coding_program.exe`
+2. Double-click `text_coding_program.exe` — expect a SmartScreen prompt the
+   first time if the build is unsigned ("More info" → "Run anyway")
 3. A browser opens to the project picker — create a new project or resume an existing one
 4. Close the console window to stop the server
 
-Projects are saved in a `projects/` folder next to the exe and persist across sessions. No installation required.
+
+
+### Local access control
+
+The server holds a browser-reachable window onto the coder's filesystem: it
+renders PDFs, writes coded output, and exposes a native folder-picker dialog.
+Binding to `127.0.0.1` keeps it off the network but is not a boundary by itself —
+every process running as that user can reach it, and any web page the coder
+opens can make their browser send it requests.
+
+Three checks in `server.py`'s
+`_local_guard()` close that gap:
+
+| Check | Blocks |
+| --- | --- |
+| Per-run session token (HttpOnly, `SameSite=Strict` cookie; `X-Session-Token` also accepted) | Other local processes and users driving the server |
+| Host header allow-list | DNS rebinding — a remote page pointing a hostname it controls at loopback |
+| Origin check | Cross-site requests from any page the coder has open |
+
+Also: `--host` refuses non-loopback addresses unless you pass
+`--allow-non-loopback`, since serving this on a LAN exposes the documents being
+coded; the save endpoint accepts only trinomials the loaded project actually
+discovered, so a crafted request can't steer the write out of the project
+folder; and FastAPI's `/docs` and `/openapi.json` are disabled.
+
+One known limitation: cookies are not port-scoped, so a *different* local server
+on another port could be sent the session cookie if the browser navigates to it.
+That requires an attacker already running code as the coder, which is outside
+what a single-user local tool can defend against.
 
 ## Dependencies
 
