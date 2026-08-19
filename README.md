@@ -1,42 +1,45 @@
 # text_coding_program
 
-Browser-based interactive text coding against structured codebooks, inspired by [McPherron's E4/Enterer Trois](https://www.oldstoneage.com/osa/tech/e4/). This program takes in the same kind of information that Site_coder ingests: a text corpus processed with pdf_ocr, a page mapping that highlights pages that need to be coded with site_form_segmenter, and codebook entries extracted from a natural language codebook using codebook_tools. The goal of this program is to help coders more effectively code text, without juggling multiple files, whily minimizing coder fatigue, and helping to reduce entry error. 
+This is a browser-based interactive text coding against structured codebooks, inspired by [McPherron's E4/Enterer Trois](https://www.oldstoneage.com/osa/tech/e4/). It takes: a text corpus run through pdf_ocr, a page map that reports which pages in each pdf need coding, and codebook entries pulled out of a natural-language codebook by codebook_tools. A coder works from one window. The page, the codebook entry, and the entry field sit together, which keeps attention on the text and keeps entry errors down.
 
 
 ## Pipeline context
 
-This tool sits at the end of a multi-repo pipeline. Each upstream repo produces output that feeds the next:
+This tool sits at the end of a multi-repo pipeline. Each repo upstream writes what the next one reads:
 
 ```
 pdf_ocr ──────► site_form_segmenter ──────► text_coding_program
                                       └───► site_coder (LLM batch)
 codebook_tools ───────────────────────────►
 ```
-See [pdf_ocr](https://github.com/jnpaige/pdf_ocr) for more detail about this workflow. 
+
+See [pdf_ocr](https://github.com/jnpaige/pdf_ocr) for more on the workflow.
 
 
 ## What this program does
 
-A single-page web app served locally that presents:
+It serves a single-page web app on your own machine with four parts:
 
-- **Left panel** — PDF page viewer with page navigation (arrow keys or buttons). Pages are scoped to the current segment using the segment map: any key in a segment ending in `_pages` (besides the base `pages` list itself) is treated as a named page group and unioned to build the scoped page list — `form_pages`/`narrative_pages`/`nrhp_pages` for site forms, or whatever dynamically-named `<section_type>_pages` keys a report-structural segmenter pass produced (see `segment_reports_pass0.py`). No group present → falls back to showing the segment's full `pages` list.
-- **Right panel** — Full codebook entry text for the current trait, plus data entry controls (radio buttons for binary, text input for numeric, radio buttons for categorical, checkboxes for list) and a justification field.
-- **Unit selector** — Dropdown showing each `(trinomial, segment)` pair from the segment map (e.g., "16VN1000 — Initial Survey (1997)").
-- **Progress sidebar** — Shows which traits have been coded for the current segment, with click-to-jump navigation.
+- Left panel — the PDF is displayed here one page at a time, with arrow keys or buttons to flip between pages. Pages are scoped to the segment you are coding.
+- Right panel — the full codebook entry for the current trait, the entry controls for it, and a justification field. Binary traits get radio buttons, numeric traits a text box, categorical traits trigger radio buttons, lists get checkboxes.
+- Unit selector — a dropdown of every document-and-segment pair, like "16VN1000 — Initial Survey (1997)".
+- Progress sidebar — which traits are done for this segment. Click one to jump to it.
 
-Workflow: the coding unit is one segment within one file (a segment from `segments.json` — for site forms this is typically a site investigation, but the tool doesn't assume that; site_form_segmenter's own output schema is generic, and a segment could equally be a report structural section or a narrowed per-trinomial pass). For each unit, you code all traits, then advance to the next segment.
+The unit of work is one segment inside one document. A segment is whatever the segment file says it is. For a site form it is usually one investigation. For a report it might be a chapter. The program cycles through every code for every trait, and cycles through every segment of every document and saves the resulting decisions. 
+
+Each coding project can be saved as its own project, with unique identifiers, and associated with particular coders given by "coder id". 
 
 ### Keyboard shortcuts
 
 | Key | Action |
 |---|---|
-| **Enter** | Save current trait and advance to next |
-| **Esc** | Skip to next trait without saving |
-| **← →** | Previous / next PDF page |
+| Enter | Save current trait and advance to next |
+| Esc | Skip to next trait without saving |
+| ← → | Previous / next PDF page |
 
 ## Setup
 
-### 1. Install uv
+### 1. Install uv and install dependencies
 
 ```powershell
 # Windows — install uv once per machine
@@ -48,71 +51,83 @@ winget install astral-sh.uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-### 2. Install dependencies
+We then just use uv to install dependencies onto the local machine. 
 
 ```powershell
 uv sync
 ```
 
-`uv.lock` is committed to the repo, so every machine gets identical package versions.
+`uv.lock` is committed, so every machine gets the same package versions.
 
-If you prefer to activate the venv manually:
 
-```powershell
-# Windows
-.venv\Scripts\activate
-python server.py
-```
+## Distributing to a team
 
-```bash
-# Mac/Linux
-source .venv/bin/activate
-python server.py
-```
+The program can be packaged as a standalone `.exe` bundle carrying its own Python runtime. A user double-clicks the exe and a browser opens.
 
-## Usage
-
-### 1. Configure paths
-
-Edit `config.yaml` (or copy `config_test.yaml` as a starting point):
-
-```yaml
-pdf_dir: 'path/to/pdf_ocr/output'             # <trinomial>/ subdirs with _ocr.pdf files
-codebook_dir: 'path/to/codebook_tools/output'  # per-trait JSON files
-segments_dir: 'path/to/segmenter/run/model'    # <trinomial>.segments.json files
-```
-
-### 2. Start the server
+### Building the bundle
 
 ```powershell
-uv run python server.py --coder jpaige
+uv run --extra build python build.py --build
 ```
 
-If `--coder` is omitted, you'll be prompted for your coder ID. The server auto-finds an open port if the configured one is busy.
+Pass `--extra build` on the build command itself. Every `uv run` resyncs the environment to the project's default dependency set, so a plain `uv run python server.py` in between prunes PyInstaller back out of `.venv`, and the next build dies with `No module named PyInstaller`. `build.py` digs itself out of this by re-invoking PyInstaller through `uv run --extra build` when it cannot import it, and passing the extra up front saves the round trip. This is pretty hacky but... it works.
 
-```powershell
-# Use a different config
-uv run python server.py --config config_test.yaml --coder jpaige
+The build produces `dist/text_coding_program/`, about 80 MB, holding the exe, the Python runtime, and every dependency. A `Text Coding Program.lnk` shortcut lands next to it in `dist/`. The build script pops up a message box saying where the shortcut went, so you can move it to the Desktop or the taskbar or the Start menu. But, if you subsequently move the exe anywhere it breaks the shortcut connection. 
+
+The build also writes `READ_ME_FIRST.txt` into the bundle and prints the exe's SHA-256. Both exist for one reason: an unsigned tool from a colleague trips a SmartScreen warning, and a coder who was told to expect it, and handed a hash to check, can decide for themselves.
+
+
+# Using the program. 
+
+## Installation
+
+1. Unzip `text_coding_program.zip` anywhere
+2. Double-click `text_coding_program.exe`. If the build is unsigned, expect a SmartScreen prompt the first time — "More info", then "Run anyway"
+3. A browser opens to the project picker. Make a new project or pick up an old one
+4. Close the console window to stop the server
+
+## Writing your own segment file
+
+A segment file is a small map. It says which pages of a document belong to which unit of coding. site_form_segmenter writes these with the help of an open weight LLM. You can also write one by hand, which for a small set of documents is often the shortest road.
+
+Put one file per document in `segments_dir`, named `<document id>.segments.json`. The document ID is the name of the document's folder under `pdf_dir`, or the PDF's own filename when the PDFs sit loose in one folder. Here is a whole file:
+
+```json
+{
+  "trinomial": "16VN1451",
+  "segments": [
+    { "label": "1995 Phase I Survey", "year": 1995, "pages": [0, 1] },
+    { "label": "1994 SCIAA Survey Report", "year": 1994, "pages": [2, 3, 4, 5] }
+  ]
+}
 ```
 
-### 3. Open browser
+A segment needs a label and a list of pages. Everything past that is optional. Five rules cover the rest.
 
-Navigate to the URL printed in the terminal. It carries a session token:
+Page numbers start at zero. The first page of the PDF is page 0. PDFs processed with pdf_ocr have a page number following this standards added to the top right of each page. 
 
+Give every segment a label, and make the labels different from each other inside one file. The label is what the program matches on when it saves, so two segments sharing a label will write over each other's traits.
+
+`year` is optional. Leave it out and the unit selector shows a question mark where the year would go.
+
+`trinomial` names the document. `report`, `document`, and `item` do the same job, and the program reads all four, since the site form, report, and GLO segmenters each picked a different one. With none of them present the ID comes from the filename, with any `<model_slug>__` prefix and the `.segments` suffix taken off.
+
+Named page groups narrow the viewer to a slice of the `pages` list. Any key ending in `_pages` counts as one, and the names are yours to pick. The site-form names `form_pages`, `narrative_pages`, and `nrhp_pages` work by that same rule:
+
+```json
+{ "label": "1995 Phase I Survey", "year": 1995,
+  "pages": [0, 1, 2], "artifact_pages": [1], "feature_pages": [2] }
 ```
-http://127.0.0.1:8090/?token=<random>
-```
 
-The token is generated fresh on every start and authorizes your browser for
-that run — visiting `http://127.0.0.1:8090` without it returns 401 with
-instructions. Don't bookmark the tokenized URL; start from the terminal (or the
-exe) each session. See "Local access control" below for why it's there.
+With groups present the viewer shows the union of the groups, here pages 1 and 2, and skips page 0. With no groups it shows all three.
 
-The packaged exe opens this URL for you, so coders never have to copy a token.
+To code whole documents, leave the segments directory blank on the project form. Every document becomes one unit covering every page of the PDF.
+
+One thing to check before you start. The document IDs in your segment files have to match the ones the program reads out of `pdf_dir`. Those come from the subfolder names, and from the PDF filenames when `pdf_dir` holds loose PDFs instead of one folder per document. The Document ID pattern on the project form narrows a name down to its first capture group, so the default `(\d{2}[A-Z]{2}\d+)` pulls `16VN1000` out of a folder named `16VN1000_Smith_1997`. Clear that field and names are taken whole, which is the setting for papers, abstracts, and reports.
 
 ## Output
 
-Output follows the same run directory convention as site_coder, with the coder ID in place of the model name:
+Output follows site_coder's run directory convention, with the coder ID standing where the model name goes:
 
 ```
 runs/
@@ -123,7 +138,7 @@ runs/
       ...
 ```
 
-Each `.coded.json` holds human-coding metadata plus one entry per segment coded:
+Each `.coded.json` holds the coding metadata and one entry per segment coded:
 
 ```json
 {
@@ -150,13 +165,13 @@ Each `.coded.json` holds human-coding metadata plus one entry per segment coded:
 }
 ```
 
-Saving is a merge keyed on `segment_label`, not a full overwrite — coding one segment of a trinomial doesn't discard previously-saved traits for another segment of the same trinomial.
+Saving merges on `segment_label`. Coding one segment of a document leaves the other segments' saved traits alone.
 
-Sessions are resumable — existing `.coded.json` files are loaded when you revisit a trinomial.
+Sessions resume. Existing `.coded.json` files are read back when you return to a document.
 
 ## Project provenance
 
-Each project's `project.json` (in `projects/<slug>/`) records a `provenance` block, captured once at project-creation time and never re-read afterward:
+Each project's `project.json`, in `projects/<slug>/`, carries a `provenance` block. It is written once when the project is created and never read again:
 
 ```json
 "provenance": {
@@ -168,32 +183,37 @@ Each project's `project.json` (in `projects/<slug>/`) records a `provenance` blo
 }
 ```
 
-`run_metadata`/`config_snapshot` come from the segmenter run's own `run_metadata.json` and its config-file snapshot (checked in `segments_dir` itself, then its parent, to cover both the current flat run-folder layout and the older per-model-subfolder one) — only present if the run actually wrote one; older runs predate this and simply won't have it. `config_snapshot` has path-shaped keys (`input_dir`, `codebook_file`, etc.) stripped out, since those describe where the run's *original* creator found its inputs, not where `segments_dir`/`codebook_dir` point to now — this is a historical record, never something the program re-resolves paths from. The live `pdf_dir`/`codebook_dir`/`segments_dir` fields elsewhere in `project.json` are what the program actually operates on; this block exists purely for audit/provenance.
+`run_metadata` and `config_snapshot` come from the segmenter run's own `run_metadata.json` and its config snapshot. The program looks in `segments_dir` itself, then in its parent, which covers both the flat run-folder layout and the older per-model-subfolder one. A run that never wrote one simply has no block, and older runs predate the whole idea.
+
+Path-shaped keys like `input_dir` and `codebook_file` are stripped out of `config_snapshot`. Those paths belong to whatever machine the run was made on. The block stands as a record of what happened. The live `pdf_dir`, `codebook_dir`, and `segments_dir` fields elsewhere in `project.json` are where the program reads from.
 
 ## Input/output contract with site_coder
 
-Verified directly against `site_coder`'s source (`coder.py`, `batch_coder.py`, `lib/reporter.py`) on 2026-08-11. Its raw `.coded.json` was never byte-identical to this tool's — it keeps the segmenter's own `label`/`year`/`pages` fields unprefixed and stores trait values as a flat `codes: {trait_key: value}` dict rather than a `traits: [...]` list of `{trait_key, trait_value, confidence, justification, evidence_pages}` objects. What *is* consistent: the top-level array key is `segments` in both tools, and site_coder's own per-run CSV export (`lib/reporter.py`'s `build_coded_csv`, written alongside every run) already uses `segment_label` as its column name — the same name this tool now uses. (site_coder has one internal inconsistency of its own: a separate, secondary batch-merge script, `merge_results.py`, still uses `investigation_label` instead of matching `reporter.py` — pre-existing, unrelated to this session's changes, not fixed here.)
+Checked against site_coder's source, `coder.py`, `batch_coder.py`, and `lib/reporter.py`, on 2026-08-11.
 
 | | text_coding_program | site_coder |
 |---|---|---|
-| **Input: PDFs** | `pdf_dir` — renders `_ocr.pdf` for viewing | `md_input_dir` — reads `text_docling.txt` for LLM prompts |
-| **Input: segments** | `segments_dir` — scopes pages per segment | `segments_dir` — scopes text per segment |
-| **Input: codebook** | `codebook_dir` — displays entries for human coder | `codebook_dir` — injects entries into LLM prompts |
-| **Output** | `<coder_id>/<tri>.coded.json` | `<model_slug>/<tri>.coded.json` |
-| **Output schema** | `{trinomial, segments: [{segment_label, segment_year, traits: [...]}]}` | `{trinomial, segments: [{label, year, codes: {...}}]}` — same `segments` array, different trait representation |
-| **Coding unit** | one segment (from segment map) | one segment (from segment map) |
+| Input: PDFs | `pdf_dir` — renders `_ocr.pdf` for viewing | `md_input_dir` — reads `text_docling.txt` for LLM prompts |
+| Input: segments | `segments_dir` — scopes pages per segment | `segments_dir` — scopes text per segment |
+| Input: codebook | `codebook_dir` — displays entries for human coder | `codebook_dir` — injects entries into LLM prompts |
+| Output | `<coder_id>/<tri>.coded.json` | `<model_slug>/<tri>.coded.json` |
+| Output schema | `{trinomial, segments: [{segment_label, segment_year, traits: [...]}]}` | `{trinomial, segments: [{label, year, codes: {...}}]}` |
+| Coding unit | one segment (from segment map) | one segment (from segment map) |
 
-The trait representations differ (list-of-objects-with-justification/confidence vs. flat value dict) — that gap predates today's changes and isn't new. An IRR comparison pipeline (Cohen's kappa, Krippendorff's alpha) needs to normalize both into a common shape; site_coder does this per-run via `build_coded_csv`. On this side, **project export** now writes the equivalent flat table (`coded_data.csv`, keyed on `trinomial` + `segment_key` + `trait_key`) — see below.
+The two raw formats diverge. site_coder keeps the segmenter's `label`, `year`, and `pages` fields unprefixed and stores trait values as a flat `codes: {trait_key: value}` dict. This tool prefixes those fields and stores each trait as an object carrying justification, confidence, and evidence pages. Both share the top-level `segments` array and the column name `segment_label`, which site_coder's per-run CSV export already used.
+
+Comparing coders against models, for Cohen's kappa or Krippendorff's alpha, means flattening both into one shape. site_coder does that per run in `build_coded_csv`. This side does it in project export, which writes `coded_data.csv` keyed on `trinomial`, `segment_key`, and `trait_key`. See below.
+
+One loose end sits on the site_coder side: `merge_results.py`, a secondary batch-merge script, still writes `investigation_label` where `reporter.py` writes `segment_label`.
 
 ## Exporting results
 
-"Export…" on any project card in the picker writes a folder you can copy to
-another computer and read:
+"Export…" on any project card in the picker writes a folder you can copy to another computer and read:
 
 ```
 <project>_export_<timestamp>/
   coded_data.csv       one row per coded trait — the file to open in Excel/R/pandas
-  project_export.json  the same data structured rather than flattened
+  project_export.json  the same data in nested form
   coded/               the original per-trinomial .coded.json files, unmodified
   codebook/            per-trait JSON, so trait definitions travel with the results
   project.json         project metadata and the source paths this export came from
@@ -201,60 +221,13 @@ another computer and read:
   README.txt           what the folder is, written for whoever receives it
 ```
 
-Nothing needs to be installed on the receiving machine — open `coded_data.csv`.
-
-
-
-## Distributing to a team
-
-The program can be packaged as a standalone `.exe` bundle that requires no Python, uv, or terminal knowledge. Users double-click the exe and a browser opens.
-
-
-### Building the bundle
-
-```powershell
-uv run --extra build python build.py --build
-```
-
-Pass `--extra build` on the build command itself rather than relying on an
-earlier `uv sync --extra build`. `uv run` resyncs the environment to the
-project's *default* dependency set every time it runs, so a plain
-`uv run python server.py` in between prunes PyInstaller back out of `.venv` and
-the next build dies with `No module named PyInstaller`. `build.py` recovers from
-this on its own — it re-invokes PyInstaller through `uv run --extra build` when
-it isn't importable — but passing the extra up front skips the round trip.
-
-This produces `dist/text_coding_program/` (~80 MB) containing the exe, Python runtime, and all dependencies, plus a `Text Coding Program.lnk` shortcut next to it in `dist/`. The build script pops up a message box telling you where the shortcut landed so you can move it (Desktop, taskbar, Start menu, etc.) — no manual shortcut-creation step needed.
-
-It also writes `READ_ME_FIRST.txt` into the bundle and prints the exe's SHA-256.
-Both exist for the same reason: an unsigned tool from a colleague trips a
-SmartScreen prompt, and a coder who was warned in advance — and given a hash
-they can check — is making an informed decision rather than a reflexive one.
-
-The build is deliberately shaped to stay off Defender's heuristics; `build.py`'s
-module docstring explains each choice (onedir rather than onefile, UPX off, a
-real version resource). If you change the packaging, keep those three.
-
-### For end users
-
-1. Unzip `text_coding_program.zip` to any location
-2. Double-click `text_coding_program.exe` — expect a SmartScreen prompt the
-   first time if the build is unsigned ("More info" → "Run anyway")
-3. A browser opens to the project picker — create a new project or resume an existing one
-4. Close the console window to stop the server
-
-
+Open `coded_data.csv` on the receiving machine. Excel, R, and pandas all read it as it stands.
 
 ### Local access control
 
-The server holds a browser-reachable window onto the coder's filesystem: it
-renders PDFs, writes coded output, and exposes a native folder-picker dialog.
-Binding to `127.0.0.1` keeps it off the network but is not a boundary by itself —
-every process running as that user can reach it, and any web page the coder
-opens can make their browser send it requests.
+The server is a browser-reachable window onto the coder's filesystem. It renders PDFs, writes coded output, and opens a native folder-picker dialog. Binding to `127.0.0.1` keeps it off the network. Inside the machine it stays open. Every process running as that user can reach it, and any web page the coder has open can make their browser send it requests.
 
-Three checks in `server.py`'s
-`_local_guard()` close that gap:
+Three checks in `_local_guard()`, in `server.py`, close that gap:
 
 | Check | Blocks |
 | --- | --- |
@@ -262,16 +235,9 @@ Three checks in `server.py`'s
 | Host header allow-list | DNS rebinding — a remote page pointing a hostname it controls at loopback |
 | Origin check | Cross-site requests from any page the coder has open |
 
-Also: `--host` refuses non-loopback addresses unless you pass
-`--allow-non-loopback`, since serving this on a LAN exposes the documents being
-coded; the save endpoint accepts only trinomials the loaded project actually
-discovered, so a crafted request can't steer the write out of the project
-folder; and FastAPI's `/docs` and `/openapi.json` are disabled.
+Three more things hold. `--host` refuses non-loopback addresses unless you also pass `--allow-non-loopback`, because serving this on a LAN serves the documents being coded. The save endpoint accepts only the trinomials the loaded project actually discovered, so a crafted request cannot steer a write out of the project folder. FastAPI's `/docs` and `/openapi.json` are off.
 
-One known limitation: cookies are not port-scoped, so a *different* local server
-on another port could be sent the session cookie if the browser navigates to it.
-That requires an attacker already running code as the coder, which is outside
-what a single-user local tool can defend against.
+One limit is known and unfixed. Cookies are not scoped to a port, so a different local server on another port could be handed the session cookie if the browser navigates to it. That takes an attacker already running code as the coder, which is past what a single-user local tool can defend.
 
 ## Dependencies
 

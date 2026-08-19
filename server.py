@@ -98,9 +98,16 @@ _allowed_hosts: set[str] = set()
 _allowed_origins: set[str] = set()
 _loopback_only: bool = True
 
+# Louisiana trinomial. Kept as the default because it fits the site-form
+# corpora this tool started on, and treated as one configured value of a
+# general document id rather than a built-in assumption — a corpus of
+# reports, GLO volumes, or conference abstracts sets its own pattern, or
+# none at all. Mirrors site_vocab_extractor's item_pattern/trinomial_pattern.
+DEFAULT_ITEM_PATTERN = r"(\d{2}[A-Z]{2}\d+)"
+
 _project: dict | None = None
 _traits: list[dict] = []
-_trinomials: list[str] = []
+_items: list[str] = []
 _segments: dict[str, dict] = {}
 _pdf_cache: dict[str, Path] = {}
 _page_dpi: int = 150
@@ -217,41 +224,119 @@ def _load_traits(codebook_dir: Path | None) -> list[dict]:
     return traits
 
 
-def _discover_trinomials(pdf_dir: Path | None, pattern: str) -> list[str]:
+def _compile_pattern(pattern: str | None) -> re.Pattern | None:
+    """An empty or absent pattern is a real setting: take names as they are.
+    Only a non-empty string compiles to a regex."""
+    return re.compile(pattern) if pattern else None
+
+
+def _item_id(name: str, rx: re.Pattern | None) -> str | None:
+    """Document id for one file or folder name. With no pattern the name is
+    the id, which is what lets a corpus whose names carry no site number —
+    papers, abstracts, report volumes — be coded at all. With a pattern, the
+    first capture group wins, so a folder named `16VN1000_Smith_1997` still
+    resolves to the trinomial its segments file is keyed on."""
+    if rx is None:
+        return name
+    m = rx.search(name)
+    return m.group(1) if m else None
+
+
+def _pdf_stem(path: Path) -> str:
+    """Filename without extension and without pdf_ocr's `_ocr` suffix, so
+    `Smith_2019_ocr.pdf` and `Smith_2019.pdf` name the same document."""
+    stem = path.stem
+    return stem[:-4] if stem.endswith("_ocr") else stem
+
+
+def _discover_items(pdf_dir: Path | None, rx: re.Pattern | None) -> list[tuple[str, Path]]:
+    """Every document in the corpus, as (id, source) pairs.
+
+    pdf_ocr writes one subdirectory per document, so subdirectories are read
+    first, and `source` is that folder. A corpus that arrives as loose PDFs
+    in one folder — the usual shape for papers and abstracts, which have no
+    per-document sidecar files to keep together — is read from the filenames
+    instead, and `source` is the PDF. The flat pass runs only when the
+    subdirectory pass found nothing, so a pdf_ocr output root that happens to
+    hold a stray PDF at its top level is unaffected.
+
+    The source path travels with the id because a pattern can shorten a name:
+    a folder named `16VN1038_16VN3513` holds one form covering two sites and
+    yields the id `16VN1038`, which names no folder on disk. Carrying the
+    folder that produced the id is what keeps those documents reachable.
+    Where two names collapse onto one id, the first in sorted order wins.
+    """
     if not pdf_dir or not pdf_dir.is_dir():
         return []
-    rx = re.compile(pattern)
-    tris = set()
-    for d in sorted(pdf_dir.iterdir()):
-        if d.is_dir():
-            m = rx.search(d.name)
-            if m:
-                tris.add(m.group(1))
-    return sorted(tris)
+
+    def collect(candidates, name_of):
+        found: dict[str, Path] = {}
+        for c in candidates:
+            iid = _item_id(name_of(c), rx)
+            if iid and iid not in found:
+                found[iid] = c
+        return sorted(found.items())
+
+    dirs = collect(sorted(p for p in pdf_dir.iterdir() if p.is_dir()),
+                   lambda p: p.name)
+    if dirs:
+        return dirs
+    return collect(sorted(pdf_dir.glob("*.pdf")), _pdf_stem)
 
 
-def _find_pdf(pdf_dir: Path, tri: str) -> Path | None:
-    tri_dir = pdf_dir / tri
-    if tri_dir.is_dir():
-        for suffix in ("_ocr.pdf", ".pdf"):
-            candidate = tri_dir / f"{tri}{suffix}"
-            if candidate.exists():
-                return candidate
-        for f in tri_dir.glob("*.pdf"):
-            return f
-    for f in pdf_dir.glob(f"{tri}*.pdf"):
+def _find_pdf(source: Path, item: str) -> Path | None:
+    """The PDF for one document, given the folder or file discovery matched."""
+    if source.is_file():
+        return source
+    if not source.is_dir():
+        return None
+    for suffix in ("_ocr.pdf", ".pdf"):
+        candidate = source / f"{item}{suffix}"
+        if candidate.exists():
+            return candidate
+    for f in sorted(source.glob("*_ocr.pdf")):
+        return f
+    for f in sorted(source.glob("*.pdf")):
         return f
     return None
 
 
-def _load_segments(segments_dir: Path, pattern: str) -> dict[str, dict]:
+# Segmenters name the document id differently: site forms write `trinomial`
+# (segmenter.py), the report pass-0 writes `report`
+# (segment_reports_pass0.py), and both GLO passes write `document`. Reading
+# all of them is what site_form_segmenter's own generate_inventory.py does.
+_SEGMENT_ID_KEYS = ("trinomial", "report", "document", "item")
+
+
+def _segments_file_id(data: dict, path: Path, rx: re.Pattern | None) -> str:
+    """Document id for one segments.json, from its own id field when it has
+    one, otherwise from its filename.
+
+    The filename fallback strips the `.segments` suffix and any
+    `<model_slug>__` prefix that run-folder output carries, the same layout
+    site_vocab_extractor's `_find_segments_file` resolves. Without that
+    stripping a run-folder file lands under a key like
+    `qwen2_5_14b__volume_12.segments`, which matches no discovered document
+    and leaves the project silently unsegmented."""
+    for key in _SEGMENT_ID_KEYS:
+        val = data.get(key)
+        if val:
+            return str(val)
+    stem = path.stem
+    if stem.endswith(".segments"):
+        stem = stem[: -len(".segments")]
+    if "__" in stem:
+        stem = stem.split("__", 1)[1]
+    return _item_id(stem, rx) or stem
+
+
+def _load_segments(segments_dir: Path, rx: re.Pattern | None) -> dict[str, dict]:
     if not segments_dir or not segments_dir.is_dir():
         return {}
     segs = {}
-    for p in segments_dir.glob("*.segments.json"):
+    for p in sorted(segments_dir.glob("*.segments.json")):
         data = json.loads(p.read_text(encoding="utf-8"))
-        tri = data.get("trinomial", re.search(pattern, p.stem).group(1) if re.search(pattern, p.stem) else p.stem)
-        segs[tri] = data
+        segs[_segments_file_id(data, p, rx)] = data
     return segs
 
 
@@ -303,11 +388,19 @@ def _coded_path(tri: str) -> Path:
 
 
 def _load_project_data(proj: dict) -> None:
-    """Load traits, trinomials, segments, PDFs for the given project."""
-    global _project, _traits, _trinomials, _segments, _pdf_cache, _page_dpi
+    """Load traits, documents, segments, PDFs for the given project."""
+    global _project, _traits, _items, _segments, _pdf_cache, _page_dpi
 
     _project = proj
-    pattern = proj.get("trinomial_pattern", r"(\d{2}[A-Z]{2}\d+)")
+    # item_pattern is the current name; trinomial_pattern is what projects
+    # created before the rename carry, and still works. A project that sets
+    # item_pattern to an empty string means that deliberately, so `in` rather
+    # than `or` decides which key wins.
+    if "item_pattern" in proj:
+        pattern = proj["item_pattern"]
+    else:
+        pattern = proj.get("trinomial_pattern", DEFAULT_ITEM_PATTERN)
+    rx = _compile_pattern(pattern)
     _page_dpi = proj.get("page_dpi", 150)
 
     # Empty is a real state, not a broken one — a project can outlive the
@@ -317,16 +410,17 @@ def _load_project_data(proj: dict) -> None:
     codebook_dir = Path(proj["codebook_dir"]) if proj.get("codebook_dir") else None
 
     _traits = _load_traits(codebook_dir)
-    _trinomials = _discover_trinomials(pdf_dir, pattern)
+    discovered = _discover_items(pdf_dir, rx)
+    _items = [item for item, _ in discovered]
 
     _pdf_cache.clear()
-    for tri in _trinomials:
-        pdf = _find_pdf(pdf_dir, tri)
+    for item, source in discovered:
+        pdf = _find_pdf(source, item)
         if pdf:
-            _pdf_cache[tri] = pdf
+            _pdf_cache[item] = pdf
 
     seg_dir = proj.get("segments_dir")
-    _segments = _load_segments(Path(seg_dir), pattern) if seg_dir else {}
+    _segments = _load_segments(Path(seg_dir), rx) if seg_dir else {}
 
     proj["last_opened"] = datetime.now(timezone.utc).isoformat()
     _save_project(proj)
@@ -473,7 +567,8 @@ async def create_project(body: dict):
         "pdf_dir": body["pdf_dir"],
         "codebook_dir": body["codebook_dir"],
         "segments_dir": segments_dir_val,
-        "trinomial_pattern": body.get("trinomial_pattern", r"(\d{2}[A-Z]{2}\d+)"),
+        "item_pattern": body.get("item_pattern",
+                                 body.get("trinomial_pattern", DEFAULT_ITEM_PATTERN)),
         "page_dpi": int(body.get("page_dpi", 150)),
         "project_dir": str(proj_dir),
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -523,7 +618,7 @@ async def load_project(body: dict):
     proj = json.loads(proj_path.read_text(encoding="utf-8"))
     _load_project_data(proj)
 
-    return {"status": "loaded", "name": proj["name"], "trinomials": len(_trinomials),
+    return {"status": "loaded", "name": proj["name"], "documents": len(_items),
             "traits": len(_traits), "segments": len(_segments)}
 
 
@@ -541,7 +636,7 @@ async def get_session():
     _require_project()
 
     work_queue = []
-    for tri in _trinomials:
+    for tri in _items:
         if tri not in _pdf_cache:
             continue
         seg_data = _segments.get(tri)

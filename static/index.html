@@ -148,7 +148,7 @@
           <input type="text" id="new-pdf-dir" placeholder="C:\...\2024_forms_chunk_3_surya_docling">
           <button type="button" class="btn-browse" onclick="browseFolder('new-pdf-dir')">Browse&hellip;</button>
         </div>
-        <div class="hint">Contains trinomial subdirectories with _ocr.pdf files (from pdf_ocr)</div>
+        <div class="hint">One subdirectory per document holding its _ocr.pdf (from pdf_ocr), or a folder of loose PDFs</div>
       </div>
       <div class="form-row">
         <label>Codebook directory</label>
@@ -165,6 +165,11 @@
           <button type="button" class="btn-browse" onclick="browseFolder('new-segments-dir')">Browse&hellip;</button>
         </div>
         <div class="hint">Contains .segments.json files from site_form_segmenter</div>
+      </div>
+      <div class="form-row">
+        <label>Document ID pattern (optional)</label>
+        <input type="text" id="new-item-pattern" value="(\d{2}[A-Z]{2}\d+)">
+        <div class="hint">Regex whose first group is the document ID, read from each folder or file name. The default matches a Louisiana trinomial. Clear it to use folder and file names as they are — the right setting for papers, abstracts, and reports.</div>
       </div>
       <button id="btn-create" onclick="createProject()">Create Project</button>
       <div id="create-error"></div>
@@ -410,6 +415,7 @@ async function createProject() {
     pdf_dir: document.getElementById('new-pdf-dir').value,
     codebook_dir: document.getElementById('new-codebook-dir').value,
     segments_dir: document.getElementById('new-segments-dir').value,
+    item_pattern: document.getElementById('new-item-pattern').value.trim(),
   };
 
   if (!body.name || !body.coder_id || !body.pdf_dir || !body.codebook_dir) {
