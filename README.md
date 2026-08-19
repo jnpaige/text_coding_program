@@ -1,6 +1,6 @@
 # text_coding_program
 
-This is a browser-based interactive text coding against structured codebooks, inspired by [McPherron's E4/Enterer Trois](https://www.oldstoneage.com/osa/tech/e4/). It takes: a text corpus run through pdf_ocr, a page map that reports which pages in each pdf need coding, and codebook entries pulled out of a natural-language codebook by codebook_tools. A coder works from one window. The page, the codebook entry, and the entry field sit together, which keeps attention on the text and keeps entry errors down.
+This is a browser-based interactive text coding program inspired by [McPherron's E4/Enterer Trois](https://www.oldstoneage.com/osa/tech/e4/). The goal of this tool is to help researchers to code text in a more consistent and reliable way, by both providing a program to perform the task, and by integrating text codebooks as guides for coders. It takes: a text corpus run through pdf_ocr, a page map that reports which pages in each pdf need coding, and codebook entries pulled out of a natural-language codebook by codebook_tools. A coder works from one window. The page, the codebook entry, and the entry field sit together, which keeps attention on the text and keeps entry errors down.
 
 
 ## Pipeline context
