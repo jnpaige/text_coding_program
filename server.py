@@ -32,6 +32,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
+    JSONResponse,
     PlainTextResponse,
     RedirectResponse,
     Response,
@@ -493,14 +494,69 @@ def _find_codebook_summary(codebook_dir: Path) -> dict | None:
     return json.loads(matches[0].read_text(encoding="utf-8"))
 
 
+_SOURCE_KEYS = ("pdf_dir", "codebook_dir", "segments_dir")
+
+
+# Projects saved outside projects/ are remembered here so the picker can list
+# them. A project is addressed by its "key": the bare folder name when it lives
+# in projects/, otherwise its absolute folder path.
+def _links_file() -> Path:
+    return _projects_dir / "linked_projects.json"
+
+
+def _read_links() -> list[str]:
+    try:
+        data = json.loads(_links_file().read_text(encoding="utf-8"))
+        return [s for s in data if isinstance(s, str)]
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def _in_projects_dir(d: Path) -> bool:
+    return d.resolve().parent == _projects_dir.resolve()
+
+
+def _project_key(d: Path) -> str:
+    return d.name if _in_projects_dir(d) else str(d.resolve())
+
+
+def _link_project(d: Path) -> None:
+    if _in_projects_dir(d):
+        return
+    links = _read_links()
+    if str(d.resolve()) not in links:
+        links.append(str(d.resolve()))
+        _projects_dir.mkdir(parents=True, exist_ok=True)
+        _links_file().write_text(json.dumps(links, indent=2), encoding="utf-8")
+
+
+def _resolve_project_dir(key: str) -> Path | None:
+    """Folder for a project key, or None. Only folders inside projects/ or
+    registered in the links file are reachable, so a request cannot point the
+    server at an arbitrary directory."""
+    key = (key or "").strip()
+    if not key:
+        return None
+    if Path(key).name == key:
+        d = _projects_dir / key
+        return d if (d / "project.json").is_file() else None
+    if key in _read_links() and (Path(key) / "project.json").is_file():
+        return Path(key)
+    return None
+
+
 @app.get("/api/projects")
 async def list_projects():
     _projects_dir.mkdir(exist_ok=True)
+    folders = [d for d in sorted(_projects_dir.iterdir()) if d.is_dir()]
+    folders += [Path(s) for s in _read_links() if Path(s).is_dir()]
     projects = []
-    for d in sorted(_projects_dir.iterdir()):
+    for d in folders:
         pf = d / "project.json"
         if pf.exists():
             proj = json.loads(pf.read_text(encoding="utf-8"))
+            proj["project_dir"] = str(d)
+            proj["key"] = _project_key(d)
             proj["progress"] = _count_progress(proj)
             projects.append(proj)
     return projects
@@ -515,9 +571,16 @@ async def create_project(body: dict):
     slug = re.sub(r'[^\w\s-]', '', name.lower()).strip()
     slug = re.sub(r'\s+', '_', slug)
 
-    proj_dir = _projects_dir / slug
+    location_raw = body.get("location", "").strip()
+    if location_raw:
+        base = Path(location_raw)
+        if not base.is_dir():
+            raise HTTPException(400, f"Save location not found: {base}")
+    else:
+        base = _projects_dir
+    proj_dir = base / slug
     if proj_dir.exists():
-        raise HTTPException(409, f"Project '{slug}' already exists")
+        raise HTTPException(409, f"Project '{slug}' already exists in {base}")
 
     for key in ("pdf_dir", "codebook_dir"):
         p = Path(body.get(key, ""))
@@ -576,6 +639,8 @@ async def create_project(body: dict):
         "provenance": provenance,
     }
     _save_project(proj)
+    _link_project(proj_dir)
+    proj["key"] = _project_key(proj_dir)
     return proj
 
 
@@ -610,14 +675,90 @@ async def browse_folder(body: dict):
 
 @app.post("/api/projects/load")
 async def load_project(body: dict):
-    slug = body.get("slug", "")
-    proj_path = _projects_dir / slug / "project.json"
-    if not proj_path.exists():
-        raise HTTPException(404, f"Project not found: {slug}")
+    key = body.get("key", "")
+    proj_dir = _resolve_project_dir(key)
+    if proj_dir is None:
+        raise HTTPException(404, f"Project not found: {key}")
+    proj_path = proj_dir / "project.json"
 
     proj = json.loads(proj_path.read_text(encoding="utf-8"))
+    # project_dir is stored absolute; a folder copied from another machine
+    # would otherwise write its coding back to the old location.
+    proj["project_dir"] = str(proj_path.parent)
     _load_project_data(proj)
 
+    return {"status": "loaded", "name": proj["name"], "documents": len(_items),
+            "traits": len(_traits), "segments": len(_segments)}
+
+
+def _browse_file_dialog(initial_dir: str = "") -> str:
+    """Native file picker for a project.json. Same single-machine caveat as
+    _browse_folder_dialog."""
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    root.update()
+    start = initial_dir if initial_dir and Path(initial_dir).is_dir() else None
+    path = filedialog.askopenfilename(
+        initialdir=start, parent=root, title="Locate project.json",
+        filetypes=[("Project file", "project.json"), ("JSON", "*.json"), ("All files", "*.*")])
+    root.destroy()
+    return path
+
+
+@app.post("/api/browse-file")
+async def browse_file(body: dict):
+    try:
+        loop = asyncio.get_event_loop()
+        path = await loop.run_in_executor(None, _browse_file_dialog, body.get("initial_dir", ""))
+    except Exception as e:
+        raise HTTPException(500, f"Could not open file browser: {e}")
+    return {"path": path}
+
+
+@app.post("/api/projects/open-file")
+async def open_project_file(body: dict):
+    """Open a project from a project.json anywhere on disk, in place — its
+    coded/ folder is the one beside the file. Accepts the folder as well."""
+    raw = str(body.get("path", "")).strip()
+    if not raw:
+        raise HTTPException(400, "No project file chosen")
+    p = Path(raw)
+    if p.is_dir():
+        p = p / "project.json"
+    if p.name != "project.json" or not p.is_file():
+        raise HTTPException(400, f"Not a project.json file: {p}")
+    try:
+        proj = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise HTTPException(400, f"Could not read {p}: {e}")
+    if not isinstance(proj, dict) or "name" not in proj:
+        raise HTTPException(400, f"{p} does not look like a project file")
+
+    overrides = body.get("overrides") or {}
+    for k, v in overrides.items():
+        if k not in _SOURCE_KEYS:
+            raise HTTPException(400, f"Unknown field: {k}")
+        if not Path(str(v)).is_dir():
+            raise HTTPException(400, f"{k} not found: {v}")
+        proj[k] = str(v)
+
+    missing = {k: proj[k] for k in _SOURCE_KEYS
+               if proj.get(k) and not Path(proj[k]).is_dir()}
+    if missing:
+        return JSONResponse(status_code=409, content={
+            "detail": "This project points at folders that don't exist on this machine.",
+            "name": proj["name"],
+            "missing": missing,
+        })
+
+    proj["project_dir"] = str(p.parent.resolve())
+    (p.parent / "coded").mkdir(exist_ok=True)
+    _load_project_data(proj)  # also saves project.json, so overrides persist
+    _link_project(p.parent)
     return {"status": "loaded", "name": proj["name"], "documents": len(_items),
             "traits": len(_traits), "segments": len(_segments)}
 
@@ -1048,10 +1189,11 @@ machine that does have the source corpus.
 
 @app.post("/api/projects/export")
 async def export_project_endpoint(body: dict):
-    slug = (body.get("slug") or "").strip()
-    proj_path = _projects_dir / slug / "project.json"
-    if not slug or not proj_path.is_file():
-        raise HTTPException(404, f"Project not found: {slug}")
+    key = (body.get("key") or "").strip()
+    proj_dir = _resolve_project_dir(key)
+    if proj_dir is None:
+        raise HTTPException(404, f"Project not found: {key}")
+    proj_path = proj_dir / "project.json"
 
     dest_raw = (body.get("dest_dir") or "").strip()
     if not dest_raw:
@@ -1061,7 +1203,7 @@ async def export_project_endpoint(body: dict):
         raise HTTPException(400, f"Destination folder not found: {dest_root}")
 
     proj = json.loads(proj_path.read_text(encoding="utf-8"))
-    proj["project_dir"] = str(_projects_dir / slug)
+    proj["project_dir"] = str(proj_dir)
     return _export_project(proj, dest_root)
 
 

@@ -130,6 +130,8 @@
     <div class="proj-section">
       <h3>Existing Projects</h3>
       <div id="project-list"><span id="no-projects">No projects yet</span></div>
+      <button type="button" class="btn-browse" style="margin-top:10px" onclick="openProjectFile()">Open project file&hellip;</button>
+      <div id="open-error" style="display:none;color:#f87171;font-size:13px;margin-top:8px;white-space:pre-wrap"></div>
     </div>
 
     <div class="proj-section">
@@ -167,6 +169,14 @@
         <div class="hint">Contains .segments.json files from site_form_segmenter</div>
       </div>
       <div class="form-row">
+        <label>Save project in (optional)</label>
+        <div class="path-row">
+          <input type="text" id="new-location" placeholder="Leave blank for the program's default projects folder">
+          <button type="button" class="btn-browse" onclick="browseFolder('new-location')">Browse&hellip;</button>
+        </div>
+        <div class="hint">A folder named after the project is created inside this location</div>
+      </div>
+      <div class="form-row">
         <label>Document ID pattern (optional)</label>
         <input type="text" id="new-item-pattern" value="(\d{2}[A-Z]{2}\d+)">
         <div class="hint">Regex whose first group is the document ID, read from each folder or file name. The default matches a Louisiana trinomial. Clear it to use folder and file names as they are — the right setting for papers, abstracts, and reports.</div>
@@ -179,7 +189,7 @@
 
 <!-- ============ EXPORT MODAL ============ -->
 <div id="modal-backdrop">
-  <div class="modal" id="export-modal">
+  <div class="modal" id="export-modal" style="display:none">
     <h2>Export results</h2>
     <p class="modal-sub" id="export-sub"></p>
     <div class="form-row">
@@ -199,6 +209,16 @@
       <button class="btn-primary" id="export-go" onclick="runExport()">Export</button>
     </div>
     <div class="modal-status" id="export-status"></div>
+  </div>
+  <div class="modal" id="repoint-modal" style="display:none">
+    <h2>Locate source folders</h2>
+    <p class="modal-sub" id="repoint-sub"></p>
+    <div id="repoint-rows"></div>
+    <div class="modal-buttons">
+      <button class="btn-cancel" onclick="closeModal()">Cancel</button>
+      <button class="btn-primary" id="repoint-go" onclick="submitRepoint()">Open project</button>
+    </div>
+    <div class="modal-status" id="repoint-status"></div>
   </div>
 </div>
 
@@ -281,12 +301,12 @@ async function loadProjectList() {
       <div class="proj-progress">${prog.coded_files || 0} sites coded &middot; ${prog.coded_traits || 0} trait entries</div>
       <button type="button" class="btn-export">Export&hellip;</button>
     `;
-    card.onclick = () => openProject(proj.slug);
+    card.onclick = () => openProject(proj.key);
     // The export button sits inside the card, whose click opens the project —
     // without this the picker would vanish behind the modal.
     card.querySelector('.btn-export').onclick = (e) => {
       e.stopPropagation();
-      openExportModal(proj.slug, proj.name);
+      openExportModal(proj.key, proj.name);
     };
     list.appendChild(card);
   }
@@ -333,6 +353,7 @@ async function browseInto(inputId) {
 }
 
 function _showModal(id) {
+  document.querySelectorAll('#modal-backdrop .modal').forEach(m => m.style.display = 'none');
   document.getElementById(id).style.display = 'block';
   document.getElementById('modal-backdrop').classList.add('open');
 }
@@ -347,10 +368,10 @@ function _setStatus(id, cls, html) {
   el.innerHTML = html;
 }
 
-let exportSlug = null;
+let exportKey = null;
 
-function openExportModal(slug, name) {
-  exportSlug = slug;
+function openExportModal(key, name) {
+  exportKey = key;
   document.getElementById('export-sub').textContent = name;
   document.getElementById('export-status').className = 'modal-status';
   _showModal('export-modal');
@@ -372,7 +393,7 @@ async function runExport() {
     const res = await fetch('/api/projects/export', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({slug: exportSlug, dest_dir: dest}),
+      body: JSON.stringify({key: exportKey, dest_dir: dest}),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -416,6 +437,7 @@ async function createProject() {
     codebook_dir: document.getElementById('new-codebook-dir').value,
     segments_dir: document.getElementById('new-segments-dir').value,
     item_pattern: document.getElementById('new-item-pattern').value.trim(),
+    location: document.getElementById('new-location').value.trim(),
   };
 
   if (!body.name || !body.coder_id || !body.pdf_dir || !body.codebook_dir) {
@@ -438,14 +460,102 @@ async function createProject() {
   }
 
   const proj = await res.json();
-  await openProject(proj.slug);
+  await openProject(proj.key);
 }
 
-async function openProject(slug) {
+async function openProjectFile() {
+  const errEl = document.getElementById('open-error');
+  errEl.style.display = 'none';
+  const post = (url, body) => fetch(url, {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  const fail = (msg) => { errEl.textContent = msg; errEl.style.display = 'block'; };
+
+  const pick = await post('/api/browse-file', {});
+  if (!pick.ok) return fail('Could not open file browser.');
+  const {path} = await pick.json();
+  if (!path) return;
+
+  await tryOpenFile(path, {});
+}
+
+let repointPath = null;
+
+// 409 means the project's source folders aren't on this machine: ask where
+// they live, then retry with those paths as overrides.
+async function tryOpenFile(path, overrides) {
+  const errEl = document.getElementById('open-error');
+  const res = await fetch('/api/projects/open-file', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path, overrides})});
+  const err = res.ok ? null : await res.json().catch(() => ({}));
+
+  if (res.status === 409 && err.missing) {
+    showRepointModal(path, err);
+    return;
+  }
+  if (!res.ok) {
+    errEl.textContent = (err && err.detail) || 'Failed to open project file.';
+    errEl.style.display = 'block';
+    return;
+  }
+  closeModal();
+  await enterCoding();
+}
+
+const _SOURCE_LABELS = {pdf_dir: 'PDF / OCR directory', codebook_dir: 'Codebook directory',
+                        segments_dir: 'Segments directory'};
+
+function showRepointModal(path, info) {
+  repointPath = path;
+  document.getElementById('repoint-sub').textContent =
+    `${info.name}: these folders aren't on this machine. Point each at your copy.`;
+  const rows = document.getElementById('repoint-rows');
+  rows.innerHTML = '';
+  for (const [key, old] of Object.entries(info.missing)) {
+    const row = document.createElement('div');
+    row.className = 'form-row';
+    row.innerHTML = `
+      <label></label>
+      <div class="path-row">
+        <input type="text" data-key="${key}" id="repoint-${key}">
+        <button type="button" class="btn-browse">Browse&hellip;</button>
+      </div>
+      <div class="hint"></div>`;
+    row.querySelector('label').textContent = _SOURCE_LABELS[key] || key;
+    row.querySelector('.hint').textContent = `Was: ${old}`;
+    row.querySelector('button').onclick = () => browseInto(`repoint-${key}`);
+    rows.appendChild(row);
+  }
+  document.getElementById('repoint-status').className = 'modal-status';
+  _showModal('repoint-modal');
+}
+
+async function submitRepoint() {
+  const overrides = {};
+  for (const input of document.querySelectorAll('#repoint-rows input')) {
+    if (!input.value.trim()) {
+      _setStatus('repoint-status', 'err', 'Choose a folder for every path listed.');
+      return;
+    }
+    overrides[input.dataset.key] = input.value.trim();
+  }
+  const res = await fetch('/api/projects/open-file', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: repointPath, overrides})});
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    _setStatus('repoint-status', 'err', data.detail || 'Failed to open project.');
+    return;
+  }
+  closeModal();
+  await enterCoding();
+}
+
+async function openProject(key) {
   const res = await fetch('/api/projects/load', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({slug}),
+    body: JSON.stringify({key}),
   });
 
   if (!res.ok) {
@@ -453,6 +563,10 @@ async function openProject(slug) {
     return;
   }
 
+  await enterCoding();
+}
+
+async function enterCoding() {
   document.getElementById('project-screen').classList.add('hidden');
   document.getElementById('coding-ui').classList.add('active');
   await initCoding();
